@@ -35,9 +35,9 @@ import { AppActionsProvider } from '../../contexts/AppActionsContext';
 import { useRegisterBoardSwitcher } from '../../contexts/CanvasNavigationContext';
 import { useAppNavigation } from '../../hooks/useAppNavigation';
 import { useBoardTitle } from '../../hooks/useBoardTitle';
+import { useEjectedSessions } from '../../hooks/useEjectedSessions';
 import { useEventStream } from '../../hooks/useEventStream';
 import { useFaviconStatus } from '../../hooks/useFaviconStatus';
-import { useEjectedSessions } from '../../hooks/useEjectedSessions';
 import { useLocalStorage } from '../../hooks/useLocalStorage';
 import { useRecentBoards } from '../../hooks/useRecentBoards';
 import { useSettingsRoute } from '../../hooks/useSettingsRoute';
@@ -354,8 +354,13 @@ export const App: React.FC<AppProps> = ({
 
   // Ejected session positions — stored in localStorage per user+board. Sessions in
   // this map render as interactive canvas nodes instead of opening in the sidebar.
-  const { ejectedSessions, ejectSession, updateEjectedPosition, redockSession, closeEjectedSession } =
-    useEjectedSessions(user?.user_id, currentBoardId);
+  const {
+    ejectedSessions,
+    ejectSession,
+    updateEjectedPosition,
+    redockSession,
+    closeEjectedSession,
+  } = useEjectedSessions(user?.user_id, currentBoardId);
 
   // Ref so handleSessionClick (a stable useCallback) can read ejectedSessions
   // without being included in its dependency array and breaking referential stability.
