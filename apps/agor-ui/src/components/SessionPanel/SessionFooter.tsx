@@ -39,6 +39,7 @@ import { getModelDisplayName } from '../Pill/modelDisplay';
 import { SessionIdsList } from '../SessionIds';
 import { Tag } from '../Tag';
 import { SessionMcpFooterControl } from './SessionMcpFooterControl';
+import { VoiceMicButton } from './VoiceMicButton';
 
 export interface SessionFooterProps {
   // Session data for chips
@@ -87,6 +88,8 @@ export interface SessionFooterProps {
   onEffortChange: (v: EffortLevel) => void;
   onPermissionModeChange: (v: PermissionMode) => void;
   onCodexPermissionChange: (sandbox: CodexSandboxMode, approval: CodexApprovalPolicy) => void;
+  /** Called by the mic button when voice transcription completes */
+  onInsertText?: (text: string) => void;
   // Prompt textarea rendered between the two bars
   promptInputSlot: React.ReactNode;
 }
@@ -126,6 +129,7 @@ export const SessionFooter: React.FC<SessionFooterProps> = ({
   onEffortChange,
   onPermissionModeChange,
   onCodexPermissionChange,
+  onInsertText,
   promptInputSlot,
 }) => {
   const { token } = theme.useToken();
@@ -1355,6 +1359,7 @@ export const SessionFooter: React.FC<SessionFooterProps> = ({
                 </Button>
               </Tooltip>
             )}
+            {onInsertText && <VoiceMicButton onInsertText={onInsertText} />}
             <Tooltip title={sendTooltip}>
               <Badge
                 count={queuedTasks.length > 0 ? queuedTasks.length : 0}

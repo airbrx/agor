@@ -24,6 +24,17 @@
   min-width: 0;
 }
 
+/* Pulsing animation for the active mic recording button */
+@keyframes agor-mic-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
+  }
+}
+
 /* Blinking cursor animation for streaming messages */
 @keyframes blink {
   0%,
