@@ -23,8 +23,10 @@ import {
   CloseOutlined,
   CodeOutlined,
   EllipsisOutlined,
+  ExpandAltOutlined,
   InboxOutlined,
   SettingOutlined,
+  ShrinkOutlined,
 } from '@ant-design/icons';
 import type { MenuProps } from 'antd';
 import { App, Badge, Button, Dropdown, Space, Tooltip, Typography, theme } from 'antd';
@@ -42,6 +44,10 @@ import {
   selectUserById,
 } from '../../store/selectors';
 import { getContextWindowGradient } from '../../utils/contextWindow';
+import {
+  REACT_FLOW_DRAG_HANDLE_CLASS,
+  REACT_FLOW_NO_DRAG_CLASS,
+} from '../../utils/reactFlowDragClasses';
 import { mcpServerNeedsAuth } from '../../utils/mcpAuth';
 import { useThemedMessage } from '../../utils/message';
 import { getSessionDisplayTitle, getSessionTitleStyles } from '../../utils/sessionTitle';
@@ -224,6 +230,20 @@ export interface SessionPanelProps {
   sessionMcpServerIds?: string[];
   open: boolean;
   onClose: () => void;
+  /**
+   * When provided, an "eject to board" button appears in the header.
+   * Only used in sidebar/drawer mode (not when already ejected).
+   */
+  onEject?: () => void;
+  /**
+   * When true, the panel is rendered inside a ReactFlow canvas node.
+   * - The header gets the drag-handle class so the node can be dragged by it.
+   * - The body gets wheel-stop propagation so scrolling the conversation
+   *   doesn't accidentally zoom the canvas.
+   * - The left border is suppressed (the node container provides its own border).
+   * - `onClose` becomes "Re-dock to sidebar" in the header button.
+   */
+  isEjected?: boolean;
 }
 
 const SessionPanel: React.FC<SessionPanelProps> = ({
@@ -234,6 +254,8 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
   sessionMcpServerIds = [],
   open,
   onClose,
+  onEject,
+  isEjected = false,
 }) => {
   const { token } = theme.useToken();
   const { modal } = App.useApp();
@@ -899,16 +921,20 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
         display: open ? 'flex' : 'none',
         flexDirection: 'column',
         background: token.colorBgElevated,
-        borderLeft: `1px solid ${token.colorBorder}`,
+        // Suppress the left border when ejected — the node container provides its own.
+        borderLeft: isEjected ? 'none' : `1px solid ${token.colorBorder}`,
       }}
     >
-      {/* Header */}
+      {/* Header — becomes drag-handle when ejected so the user can move the canvas node */}
       <div
+        className={isEjected ? REACT_FLOW_DRAG_HANDLE_CLASS : undefined}
         style={{
           flexShrink: 0,
           padding: `${token.sizeUnit * 3}px ${token.sizeUnit * 6}px`,
           borderBottom: `1px solid ${token.colorBorder}`,
           background: token.colorBgContainer,
+          cursor: isEjected ? 'grab' : undefined,
+          userSelect: isEjected ? 'none' : undefined,
         }}
       >
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
@@ -943,27 +969,49 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
               )}
             </div>
           </Space>
-          <Space size={4}>
+          <Space size={4} className={isEjected ? REACT_FLOW_NO_DRAG_CLASS : undefined}>
             <SessionAttachmentsDropdown items={attachmentItems} />
             <Dropdown menu={{ items: moreMenuItems }} trigger={['click']} placement="bottomRight">
               <Tooltip title="More actions">
                 <Button type="text" icon={<EllipsisOutlined />} />
               </Tooltip>
             </Dropdown>
-            <Tooltip title="Close Panel">
-              <Button
-                type="text"
-                icon={<CloseOutlined />}
-                onClick={onClose}
-                style={{ marginLeft: token.sizeUnit }}
-              />
-            </Tooltip>
+            {onEject && !isEjected && (
+              <Tooltip title="Pop out to board">
+                <Button
+                  type="text"
+                  icon={<ExpandAltOutlined />}
+                  onClick={onEject}
+                  style={{ marginLeft: token.sizeUnit }}
+                />
+              </Tooltip>
+            )}
+            {isEjected ? (
+              <Tooltip title="Re-dock to sidebar">
+                <Button
+                  type="text"
+                  icon={<ShrinkOutlined />}
+                  onClick={onClose}
+                  style={{ marginLeft: token.sizeUnit }}
+                />
+              </Tooltip>
+            ) : (
+              <Tooltip title="Close Panel">
+                <Button
+                  type="text"
+                  icon={<CloseOutlined />}
+                  onClick={onClose}
+                  style={{ marginLeft: token.sizeUnit }}
+                />
+              </Tooltip>
+            )}
           </Space>
         </div>
       </div>
 
       {/* Body - Scrollable content */}
       <div
+        className={isEjected ? REACT_FLOW_NO_DRAG_CLASS : undefined}
         style={{
           flex: 1,
           overflow: 'hidden',
@@ -971,6 +1019,8 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
           flexDirection: 'column',
           padding: `${token.sizeUnit * 3}px ${token.sizeUnit * 6}px 0`,
         }}
+        // Prevent canvas wheel-zoom while scrolling the conversation or typing
+        onWheel={isEjected ? (e) => e.stopPropagation() : undefined}
       >
         <SessionPanelContent
           client={client}

@@ -37,6 +37,7 @@ import { useAppNavigation } from '../../hooks/useAppNavigation';
 import { useBoardTitle } from '../../hooks/useBoardTitle';
 import { useEventStream } from '../../hooks/useEventStream';
 import { useFaviconStatus } from '../../hooks/useFaviconStatus';
+import { useEjectedSessions } from '../../hooks/useEjectedSessions';
 import { useLocalStorage } from '../../hooks/useLocalStorage';
 import { useRecentBoards } from '../../hooks/useRecentBoards';
 import { useSettingsRoute } from '../../hooks/useSettingsRoute';
@@ -345,6 +346,26 @@ export const App: React.FC<AppProps> = ({
   const activeUrlTargetArtifactId =
     activeUrlTarget?.kind === 'artifact' ? activeUrlTarget.id : null;
 
+  // currentBoardId must be declared before useEjectedSessions (which is scoped per board)
+  // and before effectiveSelectedSessionId (which excludes ejected sessions).
+  // Initialize current board only from explicit route/bootstrap state. Home (`/`)
+  // is a valid no-board route, so do not auto-select localStorage/first board.
+  const [currentBoardId, setCurrentBoardIdInternal] = useState(() => initialBoardId || '');
+
+  // Ejected session positions — stored in localStorage per user+board. Sessions in
+  // this map render as interactive canvas nodes instead of opening in the sidebar.
+  const { ejectedSessions, ejectSession, updateEjectedPosition, redockSession, closeEjectedSession } =
+    useEjectedSessions(user?.user_id, currentBoardId);
+
+  // Ref so handleSessionClick (a stable useCallback) can read ejectedSessions
+  // without being included in its dependency array and breaking referential stability.
+  const ejectedSessionsRef = useRef(ejectedSessions);
+  ejectedSessionsRef.current = ejectedSessions;
+
+  // Ref so eject/redock handlers can read currentBoardId without capturing a stale value.
+  const currentBoardIdRef = useRef(currentBoardId);
+  currentBoardIdRef.current = currentBoardId;
+
   // Synchronously derive the effective session selection. When a session is
   // archived/deleted, it vanishes from sessionById. Without this, there is a
   // two-phase unmount: first SessionPanel renders null (session gone but
@@ -356,15 +377,18 @@ export const App: React.FC<AppProps> = ({
   // theme token styles. By computing the effective ID synchronously, the
   // Panel conditional evaluates to false in the *same* render, producing a
   // single-phase unmount identical to the explicit-close path.
+  // Ejected sessions are excluded so they stay on the canvas rather than
+  // opening in the sidebar drawer when navigated to via URL.
   const effectiveSelectedSessionId = useMemo(
     () =>
       !isRootHomePath &&
       !pendingHomeNavigation &&
       selectedSessionId &&
-      sessionById.has(selectedSessionId)
+      sessionById.has(selectedSessionId) &&
+      !ejectedSessions[selectedSessionId]
         ? selectedSessionId
         : null,
-    [isRootHomePath, pendingHomeNavigation, selectedSessionId, sessionById]
+    [isRootHomePath, pendingHomeNavigation, selectedSessionId, sessionById, ejectedSessions]
   );
 
   const [leftPanelTab, setLeftPanelTab] = useState<BoardAssistantPanelTab>('assistant');
@@ -403,10 +427,6 @@ export const App: React.FC<AppProps> = ({
 
   // Handle external user settings modal control (e.g., from onboarding "Configure API Keys")
   const effectiveUserSettingsOpen = userSettingsOpen || !!openUserSettings;
-
-  // Initialize current board only from explicit route/bootstrap state. Home (`/`)
-  // is a valid no-board route, so do not auto-select localStorage/first board.
-  const [currentBoardId, setCurrentBoardIdInternal] = useState(() => initialBoardId || '');
 
   // Initialize comments panel state from localStorage (collapsed by default)
   const [commentsPanelCollapsed, setCommentsPanelCollapsed] = useLocalStorage<boolean>(
@@ -666,6 +686,37 @@ export const App: React.FC<AppProps> = ({
     if (currentBoardId) navigation.goToBoard(currentBoardId);
   }, [navigation, currentBoardId]);
 
+  // Eject a session from the sidebar drawer onto the board canvas as a live node.
+  // Position is derived from the viewport center plus a small offset per existing ejected count.
+  const handleEjectSession = useCallback(
+    (sessionId: string) => {
+      const center = sessionCanvasRef.current?.getViewportCenter() ?? { x: 200, y: 100 };
+      const ejectedCount = Object.keys(ejectedSessionsRef.current).length;
+      const offset = ejectedCount * 40;
+      ejectSession(sessionId, { x: center.x - 300 + offset, y: center.y - 350 + offset });
+      // Close the sidebar drawer — the session now lives on the canvas.
+      if (currentBoardIdRef.current) navigation.goToBoard(currentBoardIdRef.current);
+    },
+    [ejectSession, navigation]
+  );
+
+  // Move an ejected session back into the sidebar drawer.
+  const handleRedockSession = useCallback(
+    (sessionId: string) => {
+      redockSession(sessionId);
+      navigation.goToSession(sessionId);
+    },
+    [redockSession, navigation]
+  );
+
+  // Close an ejected session without re-docking. Next click opens it in the drawer.
+  const handleCloseEjectedSession = useCallback(
+    (sessionId: string) => {
+      closeEjectedSession(sessionId);
+    },
+    [closeEjectedSession]
+  );
+
   const handleCloseTerminal = () => {
     setTerminalOpen(false);
     setTerminalCommands([]);
@@ -826,6 +877,10 @@ export const App: React.FC<AppProps> = ({
 
   const handleSessionClick = useCallback(
     (sessionId: string) => {
+      // If the session is already ejected onto the canvas, don't also open it in the drawer.
+      // The ejected node is its own live panel.
+      if (ejectedSessionsRef.current[sessionId]) return;
+
       const session = sessionByIdRef.current.get(sessionId);
 
       // Best-effort: clear highlight flags when opening the conversation.
@@ -1253,6 +1308,10 @@ export const App: React.FC<AppProps> = ({
                         onOpenCommentsPanel={handleOpenCommentsPanel}
                         onCommentHover={setHoveredCommentId}
                         onCommentSelect={handleCommentSelect}
+                        ejectedSessions={ejectedSessions}
+                        onEjectSessionRedock={handleRedockSession}
+                        onEjectSessionClose={handleCloseEjectedSession}
+                        onUpdateEjectedPosition={updateEjectedPosition}
                       />
                     )}
                     <NewSessionButton
@@ -1308,6 +1367,11 @@ export const App: React.FC<AppProps> = ({
                           }
                           open={!!effectiveSelectedSessionId}
                           onClose={handleCloseSessionPanel}
+                          onEject={
+                            effectiveSelectedSessionId
+                              ? () => handleEjectSession(effectiveSelectedSessionId)
+                              : undefined
+                          }
                         />
                       ) : (
                         <EventStreamPanel
