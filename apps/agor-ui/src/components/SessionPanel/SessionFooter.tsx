@@ -11,6 +11,7 @@ import type {
 import {
   BranchesOutlined,
   ClockCircleOutlined,
+  CommentOutlined,
   EllipsisOutlined,
   ForkOutlined,
   IdcardOutlined,
@@ -82,6 +83,8 @@ export interface SessionFooterProps {
   onModelConfigChange: (config: ModelConfig) => void;
   onOpenSessionSettings?: (sessionId: string) => void;
   onSendPrompt: () => void;
+  /** Post a human-to-human ping note. Omit to hide the Ping button entirely. */
+  onSendPing?: () => void;
   onStop: () => void;
   onFork: () => void;
   onBtwSend: () => void;
@@ -124,6 +127,7 @@ export const SessionFooter: React.FC<SessionFooterProps> = ({
   onModelConfigChange,
   onOpenSessionSettings,
   onSendPrompt,
+  onSendPing,
   onStop,
   onFork,
   onBtwSend,
@@ -198,6 +202,9 @@ export const SessionFooter: React.FC<SessionFooterProps> = ({
   const btwForkDisabled = connectionDisabled || !hasInput || composerAttachmentsPresent;
   const spawnDisabled = connectionDisabled || isRunning || composerAttachmentsPresent;
   const sendDisabled = connectionDisabled || composerAttachmentUploading || !hasInput;
+  // Pings never touch the executor, so unlike sendDisabled they don't care
+  // about composerAttachmentUploading (attachments aren't sent with a ping).
+  const pingDisabled = connectionDisabled || !hasInput;
 
   const sectionHeaderStyle: React.CSSProperties = {
     padding: '6px 12px 3px',
@@ -1539,6 +1546,21 @@ export const SessionFooter: React.FC<SessionFooterProps> = ({
                   disabled={!isRunning || stopRequestInFlight}
                 >
                   Stop
+                </Button>
+              </Tooltip>
+            )}
+            {onSendPing && (
+              <Tooltip title="Post a note to collaborators — not sent to the agent">
+                <Button
+                  size="small"
+                  type="text"
+                  aria-label="Ping collaborators"
+                  icon={<CommentOutlined />}
+                  onClick={onSendPing}
+                  disabled={pingDisabled}
+                  data-testid="ping-bar-btn"
+                >
+                  Ping
                 </Button>
               </Tooltip>
             )}

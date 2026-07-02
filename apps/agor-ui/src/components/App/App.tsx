@@ -124,6 +124,11 @@ export interface AppProps {
     prompt: string,
     permissionMode?: PermissionMode
   ) => boolean | undefined | Promise<boolean | undefined>;
+  onSendPing?: (
+    sessionId: string,
+    text: string,
+    mentionedUserIds?: string[]
+  ) => boolean | undefined | Promise<boolean | undefined>;
   onUpdateSession?: (sessionId: string, updates: Partial<Session>) => void;
   onDeleteSession?: (sessionId: string) => void;
   onCreateBoard?: (board: Partial<Board>) => Promise<Board | null>;
@@ -269,6 +274,7 @@ export const App: React.FC<AppProps> = ({
   onBtwForkSession,
   onSpawnSession,
   onSendPrompt,
+  onSendPing,
   onUpdateSession,
   onDeleteSession,
   onCreateBoard,
@@ -1066,6 +1072,7 @@ export const App: React.FC<AppProps> = ({
   const appActionsValue = useMemo(
     () => ({
       onSendPrompt,
+      onSendPing,
       onFork: onForkSession,
       onBtwFork: onBtwForkSession,
       onSubsession: onSpawnSession,
@@ -1086,6 +1093,7 @@ export const App: React.FC<AppProps> = ({
     }),
     [
       onSendPrompt,
+      onSendPing,
       onForkSession,
       onBtwForkSession,
       onSpawnSession,
