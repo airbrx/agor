@@ -456,6 +456,7 @@ export const messages = pgTable(
         'daemon_restart',
         'daemon_crash',
         'widget_request',
+        'mention',
       ],
     }).notNull(),
     role: text('role', {

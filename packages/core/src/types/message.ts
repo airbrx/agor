@@ -5,7 +5,7 @@
  * Messages are stored in a normalized table and referenced by tasks via message_range.
  */
 
-import type { MessageID, SessionID, TaskID } from './id';
+import type { MessageID, SessionID, TaskID, UserID } from './id';
 import type { WidgetMessageMetadata } from './widget';
 
 /**
@@ -40,7 +40,8 @@ export type MessageType =
   | 'input_request'
   | 'daemon_restart'
   | 'daemon_crash'
-  | 'widget_request';
+  | 'widget_request'
+  | 'mention';
 
 /**
  * Content block (for multi-modal messages)
@@ -262,6 +263,15 @@ export interface Message {
      * messages. Discriminated by `widget_type`; see `types/widget.ts`.
      */
     widget?: WidgetMessageMetadata;
+
+    /**
+     * @mentioned user IDs. Only populated on `type === 'mention'` messages
+     * (the ping/comment compose action — see `context/explorations/` or PR
+     * description for design). Mirrors `BoardComment.mentions`. These
+     * messages are human-to-human notes: never dispatched to the agent and
+     * excluded from agent-facing message search (see mcp/tools/messages.ts).
+     */
+    mentions?: UserID[];
 
     /**
      * Marks the user-role message / task as having been authored by the
