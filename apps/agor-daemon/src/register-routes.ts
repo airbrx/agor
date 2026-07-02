@@ -127,12 +127,12 @@ import {
 } from './utils/mcp-header-secrets.js';
 import { canControlCliSession } from './utils/mcp-token-authorization.js';
 import { ensureScheduleRunsAsCaller } from './utils/schedule-hooks.js';
-import { findHostTaskForSession } from './utils/session-tasks.js';
 import { stopSessionPreserveQueue } from './utils/session-stop.js';
 import {
   sessionCanStartTask,
   shouldReconcileSessionPromptState,
 } from './utils/session-task-state.js';
+import { findHostTaskForSession } from './utils/session-tasks.js';
 import { type SessionTurnLocks, withSessionTurnLock } from './utils/session-turn-lock.js';
 import { normalizeMessageSource, runExistingTask } from './utils/task-runner.js';
 import {
