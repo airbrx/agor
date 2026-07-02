@@ -119,12 +119,34 @@ export interface SessionPromptOptions extends Omit<SessionPromptRequest, 'prompt
   params?: Params;
 }
 
+/**
+ * Body shape for `POST /sessions/:id/ping` — a human-to-human note in the
+ * conversation stream (Slack-style `@collaborator ...`). Unlike `prompt()`,
+ * this never creates a Task or invokes the agent; it only writes a
+ * `type: 'mention'` message. See `context/` / PR description for the design
+ * rationale (composer action vs. `@`-prefix heuristic).
+ */
+export interface SessionPingRequest {
+  text: string;
+  mentioned_user_ids?: string[];
+}
+
+export interface SessionPingOptions {
+  params?: Params;
+}
+
 export interface SessionsClientHelpers {
   prompt(
     sessionId: string,
     prompt: string,
     options?: SessionPromptOptions
   ): Promise<SessionPromptResult>;
+  ping(
+    sessionId: string,
+    text: string,
+    mentionedUserIds?: string[],
+    options?: SessionPingOptions
+  ): Promise<Message>;
 }
 
 /**
@@ -883,6 +905,20 @@ function extendSessionsHelpers(client: AgorClient): void {
         .service(`sessions/${sessionId}/prompt`)
         .create({ prompt, ...requestOptions } as SessionPromptRequest, params);
       return response as SessionPromptResult;
+    },
+    ping: async (
+      sessionId: string,
+      text: string,
+      mentionedUserIds?: string[],
+      options?: SessionPingOptions
+    ) => {
+      const response = await client
+        .service(`sessions/${sessionId}/ping`)
+        .create(
+          { text, mentioned_user_ids: mentionedUserIds } as SessionPingRequest,
+          options?.params
+        );
+      return response as Message;
     },
   };
 
