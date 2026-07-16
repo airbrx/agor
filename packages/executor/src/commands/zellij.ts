@@ -168,6 +168,15 @@ export async function handleZellijAttach(
         HOME: actualHome, // Ensure Zellij uses correct home for cache/config
         XDG_CACHE_HOME: `${actualHome}/.cache`, // Explicit cache dir
         XDG_CONFIG_HOME: `${actualHome}/.config`, // Explicit config dir
+        // Force a short IPC socket directory. Zellij places its Unix-domain
+        // control socket at `$ZELLIJ_SOCKET_DIR/zellij-<uid>/<version>/<session>`,
+        // which must stay under the OS ~103-byte sun_path limit. On macOS the
+        // default $TMPDIR is a long `/var/folders/...` path, and our session
+        // names are `agor-<24-char-user-id>`, so the default socket path
+        // overflows and zellij exits 1 immediately ("IPC socket path is too
+        // long"). A short, fixed dir keeps the path well under the limit on
+        // every platform (per-uid `zellij-<uid>` subdir preserves isolation).
+        ZELLIJ_SOCKET_DIR: cleanEnv.ZELLIJ_SOCKET_DIR || '/tmp/zellij',
       },
     });
 
