@@ -33,7 +33,7 @@ import type { PermissionService } from '../../permissions/permission-service.js'
 import type { MCPServersConfig, SessionID, TaskID } from '../../types.js';
 import { resolveContextUserId } from '../base/context-user.js';
 import type { MessagesService, SessionsPatchClient, TasksService } from '../base/index.js';
-import { getMcpServersForSession } from '../base/mcp-scoping.js';
+import { AGOR_MCP_SERVER_NAME, getMcpServersForSession } from '../base/mcp-scoping.js';
 import {
   buildMcpToolPermissionIndex,
   EMPTY_MCP_TOOL_PERMISSION_INDEX,
@@ -526,7 +526,7 @@ export async function setupQuery(
 
       console.log(`🔌 Configuring Agor MCP server at ${daemonUrl}/mcp`);
       const mcpConfig = {
-        agor: {
+        [AGOR_MCP_SERVER_NAME]: {
           type: 'http' as const,
           url: `${daemonUrl}/mcp`,
           headers: {
@@ -549,12 +549,16 @@ export async function setupQuery(
     try {
       // Use shared MCP scoping utility
       // Pass forUserId to enable per-user OAuth token injection
-      const serversWithSource = await getMcpServersForSession(sessionId, {
-        sessionMCPRepo: deps.sessionMCPRepo,
-        mcpServerRepo: deps.mcpServerRepo,
-        mcpOAuthAuthHeadersRepo: deps.mcpOAuthAuthHeadersRepo,
-        forUserId: contextUserId,
-      });
+      const serversWithSource = await getMcpServersForSession(
+        sessionId,
+        {
+          sessionMCPRepo: deps.sessionMCPRepo,
+          mcpServerRepo: deps.mcpServerRepo,
+          mcpOAuthAuthHeadersRepo: deps.mcpOAuthAuthHeadersRepo,
+          forUserId: contextUserId,
+        },
+        { toolFiltering: 'exclude', interactiveApproval: canPromptForPermission }
+      );
 
       mcpToolPermissions = buildMcpToolPermissionIndex(
         serversWithSource.map(({ server }) => server)
@@ -563,7 +567,6 @@ export async function setupQuery(
       if (serversWithSource.length > 0) {
         // Convert to SDK format
         const mcpConfig: MCPServersConfig = {};
-        const allowedTools: string[] = [];
         const deniedTools: string[] = [];
         let remoteServerCount = 0;
         let stdioServerCount = 0;
@@ -572,6 +575,16 @@ export async function setupQuery(
         const unresolvedAuthServers: string[] = [];
 
         for (const { server } of serversWithSource) {
+          // The built-in Agor server carries this session's daemon bearer token
+          // and is auto-approved by name in canUseTool. A DB server claiming the
+          // same key would inherit both, so it never gets to.
+          if (server.name === AGOR_MCP_SERVER_NAME) {
+            console.warn(
+              `   ⚠️  Skipping MCP server "${server.name}": reserved for the built-in Agor MCP server`
+            );
+            continue;
+          }
+
           // Infer transport if missing (backwards compatibility)
           const transport = server.transport || (server.url ? 'sse' : 'stdio');
           if (transport === 'stdio') {
@@ -637,19 +650,6 @@ export async function setupQuery(
           for (const tool of listMcpToolsWithPermission(server, blocked)) {
             deniedTools.push(`mcp__${server.name}__${tool}`);
           }
-
-          // Anything the user gated must not be pre-allowlisted — an allowlist
-          // entry short-circuits canUseTool, and with it the permission prompt.
-          const gated = new Set(listMcpToolsWithPermission(server, ['deny', 'ask']));
-
-          // Add tools to allowlist
-          if (server.tools) {
-            for (const tool of server.tools) {
-              if (!gated.has(tool.name)) {
-                allowedTools.push(tool.name);
-              }
-            }
-          }
         }
 
         // Merge with existing MCP servers (preserve Agor MCP server)
@@ -674,10 +674,6 @@ export async function setupQuery(
             `   ⚠️  Failed to resolve MCP auth for ${unresolvedAuthServers.length} server(s): ` +
               formatListForLog(unresolvedAuthServers, 3)
           );
-        }
-        if (allowedTools.length > 0) {
-          queryOptions.allowedTools = allowedTools;
-          console.log(`   🔧 MCP tools allowlist: ${allowedTools.length} tool(s)`);
         }
         if (deniedTools.length > 0) {
           queryOptions.disallowedTools = [

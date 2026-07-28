@@ -28,6 +28,15 @@ import type {
   MCPServerRepository,
   SessionMCPServerRepository,
 } from '../../db/feathers-repositories.js';
+import type { HandlerPermissionCapabilities } from './mcp-tool-permissions.js';
+import { canEnforceMcpToolPermissions } from './mcp-tool-permissions.js';
+
+/**
+ * Config key the built-in Agor MCP server is installed under. Reserved: it
+ * carries the session's daemon bearer token and is auto-approved by name, so a
+ * user-configured server must never be able to claim it.
+ */
+export const AGOR_MCP_SERVER_NAME = 'agor';
 
 const DEBUG_MCP_SCOPING =
   process.env.AGOR_DEBUG_MCP_SCOPING === '1' || process.env.DEBUG?.includes('mcp-scoping');
@@ -93,7 +102,8 @@ export interface MCPResolutionDeps {
  */
 export async function getMcpServersForSession(
   sessionId: SessionID,
-  deps: MCPResolutionDeps
+  deps: MCPResolutionDeps,
+  caps: HandlerPermissionCapabilities
 ): Promise<MCPServerWithSource[]> {
   const servers: MCPServerWithSource[] = [];
 
@@ -236,6 +246,22 @@ export async function getMcpServersForSession(
     if (serversSkipped > 0) {
       console.warn(
         `   ⚠️  Skipped ${serversSkipped} MCP server(s) due to unresolved required templates`
+      );
+    }
+
+    // Admission gate: a handler that cannot honour a server's `tool_permissions`
+    // does not get the server. Refusing to attach is the only way to keep a
+    // `deny` meaningful on a handler with no per-tool control — the alternative
+    // is handing over the exact tools someone switched off.
+    for (let i = servers.length - 1; i >= 0; i--) {
+      const { server } = servers[i];
+      if (canEnforceMcpToolPermissions(server, caps)) continue;
+
+      servers.splice(i, 1);
+      console.warn(
+        `   ⛔ Withholding MCP server "${server.name}": it sets tool_permissions this agent cannot ` +
+          `enforce (tool filtering: ${caps.toolFiltering}). Attach it to an agent that can, or clear ` +
+          `the deny/ask entries.`
       );
     }
 

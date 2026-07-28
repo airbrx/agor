@@ -1,6 +1,13 @@
 import type { MCPServer, SessionID } from '@agor/core/types';
 import { describe, expect, it, vi } from 'vitest';
 import { getMcpServersForSession } from './mcp-scoping';
+import type { HandlerPermissionCapabilities } from './mcp-tool-permissions';
+
+/** A handler that can honour anything — keeps existing cases about scoping only. */
+const ENFORCING: HandlerPermissionCapabilities = {
+  toolFiltering: 'exclude',
+  interactiveApproval: true,
+};
 
 const makeServer = (id: string, scope: MCPServer['scope'], name = id): MCPServer =>
   ({
@@ -23,11 +30,15 @@ describe('getMcpServersForSession', () => {
     const findAll = vi.fn();
     const listServers = vi.fn();
 
-    const servers = await getMcpServersForSession('session-a' as SessionID, {
-      mcpServerRepo: { findAll } as never,
-      sessionMCPRepo: { listEffectiveServers, listServers } as never,
-      forUserId: 'user-a',
-    });
+    const servers = await getMcpServersForSession(
+      'session-a' as SessionID,
+      {
+        mcpServerRepo: { findAll } as never,
+        sessionMCPRepo: { listEffectiveServers, listServers } as never,
+        forUserId: 'user-a',
+      },
+      ENFORCING
+    );
 
     expect(listEffectiveServers).toHaveBeenCalledWith('session-a', true, 'user-a');
     expect(findAll).not.toHaveBeenCalled();
@@ -45,10 +56,14 @@ describe('getMcpServersForSession', () => {
     const aGlobal = makeServer('global-a', 'global', 'alpha');
     const listEffectiveServers = vi.fn().mockResolvedValue([zSession, bGlobal, aSession, aGlobal]);
 
-    const servers = await getMcpServersForSession('session-a' as SessionID, {
-      mcpServerRepo: { findAll: vi.fn() } as never,
-      sessionMCPRepo: { listEffectiveServers } as never,
-    });
+    const servers = await getMcpServersForSession(
+      'session-a' as SessionID,
+      {
+        mcpServerRepo: { findAll: vi.fn() } as never,
+        sessionMCPRepo: { listEffectiveServers } as never,
+      },
+      ENFORCING
+    );
 
     expect(servers.map(({ server }) => server.mcp_server_id)).toEqual([
       'global-a',
@@ -65,10 +80,14 @@ describe('getMcpServersForSession', () => {
     const globalA = makeServer('global-a', 'global', 'shared');
     const listEffectiveServers = vi.fn().mockResolvedValue([sessionB, globalB, sessionA, globalA]);
 
-    const servers = await getMcpServersForSession('session-a' as SessionID, {
-      mcpServerRepo: { findAll: vi.fn() } as never,
-      sessionMCPRepo: { listEffectiveServers } as never,
-    });
+    const servers = await getMcpServersForSession(
+      'session-a' as SessionID,
+      {
+        mcpServerRepo: { findAll: vi.fn() } as never,
+        sessionMCPRepo: { listEffectiveServers } as never,
+      },
+      ENFORCING
+    );
 
     expect(servers.map(({ server }) => server.mcp_server_id)).toEqual([
       'global-a',
@@ -95,10 +114,14 @@ describe('getMcpServersForSession', () => {
       } as MCPServer;
       const listEffectiveServers = vi.fn().mockResolvedValue([oauthServer]);
 
-      const servers = await getMcpServersForSession('session-a' as SessionID, {
-        mcpServerRepo: { findAll: vi.fn() } as never,
-        sessionMCPRepo: { listEffectiveServers } as never,
-      });
+      const servers = await getMcpServersForSession(
+        'session-a' as SessionID,
+        {
+          mcpServerRepo: { findAll: vi.fn() } as never,
+          sessionMCPRepo: { listEffectiveServers } as never,
+        },
+        ENFORCING
+      );
 
       const resolved = servers.find(
         ({ server }) => server.mcp_server_id === 'oauth-server'
@@ -127,11 +150,15 @@ describe('getMcpServersForSession', () => {
       'oauth-server': { authorization: 'Bearer real-oauth-token' },
     });
 
-    const servers = await getMcpServersForSession('session-a' as SessionID, {
-      mcpServerRepo: { findAll: vi.fn() } as never,
-      sessionMCPRepo: { listEffectiveServers } as never,
-      mcpOAuthAuthHeadersRepo: { getAuthHeaders } as never,
-    });
+    const servers = await getMcpServersForSession(
+      'session-a' as SessionID,
+      {
+        mcpServerRepo: { findAll: vi.fn() } as never,
+        sessionMCPRepo: { listEffectiveServers } as never,
+        mcpOAuthAuthHeadersRepo: { getAuthHeaders } as never,
+      },
+      ENFORCING
+    );
 
     expect(getAuthHeaders).toHaveBeenCalledWith(['oauth-server']);
     const hydrated = servers.find(({ server }) => server.mcp_server_id === 'oauth-server')?.server;
@@ -139,5 +166,72 @@ describe('getMcpServersForSession', () => {
       type: 'oauth',
       oauth_access_token: 'real-oauth-token',
     });
+  });
+});
+
+describe('getMcpServersForSession - tool_permissions admission gate', () => {
+  const gatedServer = () => {
+    const server = makeServer('gated', 'global');
+    server.tool_permissions = { write_file: 'deny' };
+    return server;
+  };
+
+  async function resolve(server: MCPServer, caps: HandlerPermissionCapabilities) {
+    return getMcpServersForSession(
+      'session-a' as SessionID,
+      {
+        mcpServerRepo: { findAll: vi.fn() } as never,
+        sessionMCPRepo: { listEffectiveServers: vi.fn().mockResolvedValue([server]) } as never,
+      },
+      caps
+    );
+  }
+
+  it('withholds a gated server from a handler that cannot filter tools', async () => {
+    // Attaching it would hand over the exact tool the deny was meant to stop,
+    // which is how this control silently did nothing on Cursor and OpenCode.
+    const servers = await resolve(gatedServer(), {
+      toolFiltering: 'none',
+      interactiveApproval: false,
+    });
+
+    expect(servers).toEqual([]);
+  });
+
+  it('keeps a gated server for a handler that can exclude tools', async () => {
+    const servers = await resolve(gatedServer(), ENFORCING);
+
+    expect(servers.map(({ server }) => server.mcp_server_id)).toEqual(['gated']);
+  });
+
+  it('withholds a gated server from an include-list handler with no discovered tools', async () => {
+    // An include-list has to enumerate what stays; nothing to enumerate here.
+    const servers = await resolve(gatedServer(), {
+      toolFiltering: 'include',
+      interactiveApproval: true,
+    });
+
+    expect(servers).toEqual([]);
+  });
+
+  it('keeps a gated server for an include-list handler once tools are known', async () => {
+    const server = gatedServer();
+    server.tools = [
+      { name: 'write_file', description: '' },
+      { name: 'read_file', description: '' },
+    ];
+
+    const servers = await resolve(server, { toolFiltering: 'include', interactiveApproval: true });
+
+    expect(servers.map(({ server: s }) => s.mcp_server_id)).toEqual(['gated']);
+  });
+
+  it('leaves servers without tool_permissions untouched on every handler', async () => {
+    const servers = await resolve(makeServer('plain', 'global'), {
+      toolFiltering: 'none',
+      interactiveApproval: false,
+    });
+
+    expect(servers.map(({ server }) => server.mcp_server_id)).toEqual(['plain']);
   });
 });

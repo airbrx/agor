@@ -445,10 +445,16 @@ describe('OpenCodeTool', () => {
       await (tool as any).ensureMcpServers('session-1', client, 'test-token');
 
       // Should have called getMcpServersForSession
-      expect(mockGetMcp).toHaveBeenCalledWith('session-1', {
-        sessionMCPRepo: mockSessionMCPRepo,
-        mcpServerRepo: mockMCPServerRepo,
-      });
+      expect(mockGetMcp).toHaveBeenCalledWith(
+        'session-1',
+        {
+          sessionMCPRepo: mockSessionMCPRepo,
+          mcpServerRepo: mockMCPServerRepo,
+        },
+        // OpenCode can neither filter tools nor prompt, so gated servers are
+        // withheld from it entirely.
+        { toolFiltering: 'none', interactiveApproval: false }
+      );
 
       // Should have injected stdio server as local
       const stdioCall = mockMcpAddCalls.find((c) => c.name === 'my_custom_mcp');

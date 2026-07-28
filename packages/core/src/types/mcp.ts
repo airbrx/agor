@@ -68,7 +68,13 @@ export type JSONSchema = Record<string, unknown>;
  * Represents a callable function exposed by an MCP server
  */
 export interface MCPTool {
-  name: string; // e.g., "mcp__filesystem__list_files"
+  /**
+   * Bare tool name exactly as the server advertised it via `tools/list`
+   * (e.g. "list_files") — NOT the server-qualified name an agent SDK derives
+   * from it. Remote-supplied and unvalidated, so never feed it to an SDK
+   * option that takes permission rules.
+   */
+  name: string;
   description: string;
   input_schema?: JSONSchema; // Optional - not all MCP servers provide schemas
 }

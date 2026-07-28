@@ -255,11 +255,17 @@ export class OpenCodeTool implements ITool {
 
     if (this.sessionMCPRepo && this.mcpServerRepo) {
       try {
-        const servers = await getMcpServersForSession(sessionId as SessionID, {
-          sessionMCPRepo: this.sessionMCPRepo,
-          mcpServerRepo: this.mcpServerRepo,
-          mcpOAuthAuthHeadersRepo: this.mcpOAuthAuthHeadersRepo,
-        });
+        const servers = await getMcpServersForSession(
+          sessionId as SessionID,
+          {
+            sessionMCPRepo: this.sessionMCPRepo,
+            mcpServerRepo: this.mcpServerRepo,
+            mcpOAuthAuthHeadersRepo: this.mcpOAuthAuthHeadersRepo,
+          },
+          // OpenCode's mcp.add() takes no tool filter and Agor auto-approves
+          // every permission for it, so gated servers are withheld instead.
+          { toolFiltering: 'none', interactiveApproval: false }
+        );
 
         for (const { server } of servers) {
           const sanitizedName = server.name.toLowerCase().replace(/[^a-z0-9]+/g, '_');

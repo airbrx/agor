@@ -92,6 +92,16 @@ describe('resolveMcpToolPermission', () => {
     expect(resolveMcpToolPermission(spaced, 'mcp__preset sdx__run_query')).toBe('deny');
   });
 
+  // A dot is legal in an MCP server name but not in a tool name, so the SDK
+  // must rewrite it. Missing the rewritten form would read as "unconfigured".
+  it('matches servers whose names contain characters illegal in a tool name', () => {
+    const dotted = buildMcpToolPermissionIndex([server('My.Server', { run_query: 'deny' })]);
+
+    expect(resolveMcpToolPermission(dotted, 'mcp__My_Server__run_query')).toBe('deny');
+    // Codex lowercases as well as sanitizing.
+    expect(resolveMcpToolPermission(dotted, 'my_server__run_query')).toBe('deny');
+  });
+
   it('takes the most restrictive value when a bare name is ambiguous across servers', () => {
     const ambiguous = buildMcpToolPermissionIndex([
       server('a', { search: 'allow' }),

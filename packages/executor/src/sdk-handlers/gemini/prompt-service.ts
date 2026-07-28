@@ -739,12 +739,17 @@ export class GeminiPromptService {
       try {
         // Use shared MCP scoping utility. forUserId injects the prompter's
         // per-user OAuth tokens for personal OAuth-protected MCP servers.
-        const serversWithSource = await getMcpServersForSession(sessionId, {
-          sessionMCPRepo: this.sessionMCPRepo,
-          mcpServerRepo: this.mcpServerRepo,
-          mcpOAuthAuthHeadersRepo: this.mcpOAuthAuthHeadersRepo,
-          forUserId: contextUserId,
-        });
+        const serversWithSource = await getMcpServersForSession(
+          sessionId,
+          {
+            sessionMCPRepo: this.sessionMCPRepo,
+            mcpServerRepo: this.mcpServerRepo,
+            mcpOAuthAuthHeadersRepo: this.mcpOAuthAuthHeadersRepo,
+            forUserId: contextUserId,
+          },
+          // The scheduler runs headless; ToolCallConfirmation has no consumer.
+          { toolFiltering: 'exclude', interactiveApproval: false }
+        );
 
         // Convert to Gemini SDK format
         for (const { server } of serversWithSource) {

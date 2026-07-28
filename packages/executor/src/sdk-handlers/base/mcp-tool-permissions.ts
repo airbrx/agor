@@ -30,6 +30,51 @@ const CLAUDE_MCP_PREFIX = `mcp${SEPARATOR}`;
 export const PERMISSIONS_BLOCKED_WITHOUT_PROMPT: readonly ToolPermission[] = ['deny', 'ask'];
 
 /**
+ * What a handler can actually do about `tool_permissions`.
+ *
+ * Required at the resolution boundary rather than assumed, because the way this
+ * control failed the first time was silent: six handlers resolve MCP servers,
+ * three enforced, and the other three kept reporting success while ignoring
+ * every `deny`.
+ */
+export interface HandlerPermissionCapabilities {
+  /**
+   * - `exclude`: can name tools to drop (Claude, Gemini, Codex)
+   * - `include`: can name the tools to keep, so it needs a discovered tool list
+   *   to express "all but these" (Copilot)
+   * - `none`: no per-tool control at all (Cursor, OpenCode)
+   */
+  toolFiltering: 'exclude' | 'include' | 'none';
+  /** Whether the handler can put an approval prompt in front of a human. */
+  interactiveApproval: boolean;
+}
+
+/**
+ * Whether `server`'s configured permissions can be honoured under `caps`.
+ *
+ * A handler that cannot honour them must not be handed the server at all —
+ * attaching it anyway would expose exactly the tools someone switched off.
+ */
+export function canEnforceMcpToolPermissions(
+  server: MCPServer,
+  caps: HandlerPermissionCapabilities
+): boolean {
+  const gated = listMcpToolsWithPermission(server, PERMISSIONS_BLOCKED_WITHOUT_PROMPT);
+  if (gated.length === 0) return true;
+
+  switch (caps.toolFiltering) {
+    case 'exclude':
+      return true;
+    // An include-list has to enumerate what stays, which is impossible before
+    // the server's tools have been discovered.
+    case 'include':
+      return (server.tools?.length ?? 0) > 0;
+    case 'none':
+      return false;
+  }
+}
+
+/**
  * Ranked most-permissive-first. When a bare tool name is ambiguous across
  * servers the most restrictive configured value wins.
  */
@@ -49,11 +94,17 @@ export const EMPTY_MCP_TOOL_PERMISSION_INDEX: McpToolPermissionIndex = {
 
 /**
  * SDKs rewrite server names into their own identifier alphabets before
- * embedding them in a tool name. Indexing the sanitized form alongside the raw
- * one keeps lookups working for servers named e.g. "preset sdx".
+ * embedding them in a tool name. Indexing the rewritten forms alongside the raw
+ * one keeps lookups working for servers named e.g. "preset sdx" or "my.server".
+ *
+ * The alphabet is the tool-name one (`[a-zA-Z0-9_-]`), deliberately narrower
+ * than any single SDK's: a character we leave in but the SDK rewrites would
+ * make the index miss, and a miss reads as "unconfigured", i.e. allow. Codex
+ * also lowercases, so that variant is indexed too.
  */
-function sanitizeServerName(name: string): string {
-  return name.replace(/[^a-zA-Z0-9_.-]/g, '_');
+function serverNameAliases(name: string): string[] {
+  const sanitized = name.replace(/[^a-zA-Z0-9_-]/g, '_');
+  return [name, sanitized, sanitized.toLowerCase()];
 }
 
 /** Bare tool names on `server` whose configured permission is one of `permissions`. */
@@ -78,7 +129,7 @@ export function buildMcpToolPermissionIndex(servers: MCPServer[]): McpToolPermis
     if (!configured || Object.keys(configured).length === 0) continue;
 
     const tools = new Map<string, ToolPermission>(Object.entries(configured));
-    for (const alias of new Set([server.name, sanitizeServerName(server.name)])) {
+    for (const alias of new Set(serverNameAliases(server.name))) {
       byServer.set(alias, tools);
     }
 

@@ -669,12 +669,17 @@ export class CodexPromptService {
     codexDebug(`🔍 [Codex MCP] Fetching MCP servers for session ${shortId(sessionId)}...`);
     codexDebug(`   [Codex MCP] forUserId: ${forUserId || 'NOT SET'}`);
 
-    const serversWithSource = await getMcpServersForSession(sessionId, {
-      sessionMCPRepo: this.sessionMCPServerRepo,
-      mcpServerRepo: this.mcpServerRepo,
-      mcpOAuthAuthHeadersRepo: this.mcpOAuthAuthHeadersRepo,
-      forUserId,
-    });
+    const serversWithSource = await getMcpServersForSession(
+      sessionId,
+      {
+        sessionMCPRepo: this.sessionMCPServerRepo,
+        mcpServerRepo: this.mcpServerRepo,
+        mcpOAuthAuthHeadersRepo: this.mcpOAuthAuthHeadersRepo,
+        forUserId,
+      },
+      // `exec --json` has no channel to answer an approval prompt on.
+      { toolFiltering: 'exclude', interactiveApproval: false }
+    );
 
     const mcpServers = serversWithSource.map((s) => s.server);
 

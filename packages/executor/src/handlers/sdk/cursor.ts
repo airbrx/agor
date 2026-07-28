@@ -207,12 +207,18 @@ async function buildCursorMcpServers(args: {
     };
   }
 
-  const serversWithSource = await getMcpServersForSession(args.sessionId, {
-    sessionMCPRepo: args.repos.sessionMCP,
-    mcpServerRepo: args.repos.mcpServers,
-    mcpOAuthAuthHeadersRepo: args.repos.mcpOAuthAuthHeaders,
-    forUserId: args.forUserId,
-  });
+  const serversWithSource = await getMcpServersForSession(
+    args.sessionId,
+    {
+      sessionMCPRepo: args.repos.sessionMCP,
+      mcpServerRepo: args.repos.mcpServers,
+      mcpOAuthAuthHeadersRepo: args.repos.mcpOAuthAuthHeaders,
+      forUserId: args.forUserId,
+    },
+    // @cursor/sdk exposes no per-tool filter and runs autonomously, so a server
+    // that gates tools cannot be honoured and is withheld instead.
+    { toolFiltering: 'none', interactiveApproval: false }
+  );
 
   for (const { server } of serversWithSource) {
     const name = claimMcpName(server.name, claimed);

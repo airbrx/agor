@@ -15,6 +15,7 @@ import { shortId } from '@agor/core/db';
 import { renderAgorSystemPrompt } from '@agor/core/templates/session-context';
 import { mergeMCPRemoteHeaders } from '@agor/core/tools/mcp/http-headers';
 import { resolveMCPAuthHeaders } from '@agor/core/tools/mcp/jwt-auth';
+import type { MCPServer } from '@agor/core/types';
 import type { CopilotSession } from '@github/copilot-sdk';
 import { CopilotClient } from '@github/copilot-sdk';
 import { getDaemonUrl } from '../../config.js';
@@ -31,9 +32,14 @@ import type {
 import type { PermissionService } from '../../permissions/permission-service.js';
 import { reportSdkActivity, type SdkActivityCallback } from '../../sdk-watchdog.js';
 import type { TokenUsage } from '../../types/token-usage.js';
-import type { PermissionMode, SessionID, TaskID } from '../../types.js';
+import type { PermissionMode, SessionID, TaskID, UserID } from '../../types.js';
+import { resolveContextUserId } from '../base/context-user.js';
 import type { MessagesService, SessionsPatchClient, TasksService } from '../base/index.js';
 import { getMcpServersForSession } from '../base/mcp-scoping.js';
+import {
+  listMcpToolsWithPermission,
+  PERMISSIONS_BLOCKED_WITHOUT_PROMPT,
+} from '../base/mcp-tool-permissions.js';
 import type { CopilotSessionEvents } from './event-mapper.js';
 import { DEFAULT_COPILOT_MODEL } from './models.js';
 import { createPermissionHandler, type PermissionDeps } from './permission-mapper.js';
@@ -105,6 +111,25 @@ export interface CopilotRawResponse {
   sessionId?: string;
 }
 
+/**
+ * Copilot's per-server `tools` is an include-list ("*" means all), so gating a
+ * tool means naming everything else. The admission gate in `mcp-scoping` has
+ * already withheld any server that sets permissions without a discovered tool
+ * list, so enumeration is safe by the time we get here.
+ */
+export function resolveCopilotServerTools(server: MCPServer): string[] {
+  const blocked = new Set(listMcpToolsWithPermission(server, PERMISSIONS_BLOCKED_WITHOUT_PROMPT));
+  if (blocked.size === 0) return ['*'];
+
+  const allowed = (server.tools ?? [])
+    .map((tool) => tool.name)
+    .filter((name) => !blocked.has(name));
+  console.warn(
+    `   ⛔ [Copilot MCP] Restricting "${server.name}" to ${allowed.length} tool(s) per tool_permissions`
+  );
+  return allowed;
+}
+
 export class CopilotPromptService {
   private client: InstanceType<typeof CopilotClient> | null = null;
   private stopRequested = new Map<SessionID, boolean>();
@@ -149,22 +174,31 @@ export class CopilotPromptService {
    */
   private async buildMcpServers(
     sessionId: SessionID,
-    mcpToken?: string
+    mcpToken: string | undefined,
+    forUserId: UserID | undefined
   ): Promise<Record<string, unknown>> {
     const copilotMcpServers: Record<string, unknown> = {};
 
     // Fetch MCP servers for this session
-    const serversWithSource = await getMcpServersForSession(sessionId, {
-      sessionMCPRepo: this.sessionMCPServerRepo,
-      mcpServerRepo: this.mcpServerRepo,
-      mcpOAuthAuthHeadersRepo: this.mcpOAuthAuthHeadersRepo,
-    });
+    const serversWithSource = await getMcpServersForSession(
+      sessionId,
+      {
+        sessionMCPRepo: this.sessionMCPServerRepo,
+        mcpServerRepo: this.mcpServerRepo,
+        mcpOAuthAuthHeadersRepo: this.mcpOAuthAuthHeadersRepo,
+        forUserId,
+      },
+      // Copilot's per-server `tools` is an include-list, and permission
+      // requests reach the UI via onPermissionRequest.
+      { toolFiltering: 'include', interactiveApproval: true }
+    );
 
     const mcpServers = serversWithSource.map((s) => s.server);
     console.log(`📊 [Copilot MCP] Found ${mcpServers.length} MCP server(s) for session`);
 
     for (const server of mcpServers) {
       const serverName = server.name.toLowerCase().replace(/[^a-z0-9_-]/g, '_');
+      const tools = resolveCopilotServerTools(server);
 
       if (server.transport === 'stdio') {
         copilotMcpServers[serverName] = {
@@ -172,14 +206,14 @@ export class CopilotPromptService {
           command: server.command,
           args: server.args,
           env: server.env,
-          tools: ['*'],
+          tools,
         };
         console.log(`   📝 [Copilot MCP] Configured STDIO server: ${server.name}`);
       } else if (server.transport === 'http' || server.transport === 'sse') {
         const serverConfig: Record<string, unknown> = {
           type: 'http',
           url: server.url,
-          tools: ['*'],
+          tools,
         };
 
         const authHeaders = await resolveMCPAuthHeaders(server.auth, server.url);
@@ -291,7 +325,12 @@ export class CopilotPromptService {
         permissionMode,
         permissionDeps
       );
-      const mcpServers = await this.buildMcpServers(sessionId, session.mcp_token);
+      const contextUserId = await resolveContextUserId({
+        session,
+        taskId,
+        tasksService: this.tasksService,
+      });
+      const mcpServers = await this.buildMcpServers(sessionId, session.mcp_token, contextUserId);
       const systemMessage = await this.buildSystemMessage(sessionId);
 
       // configuredModel for recording, invocationModel for the SDK.

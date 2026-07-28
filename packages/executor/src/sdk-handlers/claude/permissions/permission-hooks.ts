@@ -22,6 +22,7 @@ import type {
 } from '../../../db/feathers-repositories.js';
 import type { PermissionService } from '../../../permissions/permission-service.js';
 import type { MessagesService, SessionsPatchClient, TasksService } from '../../base/index.js';
+import { AGOR_MCP_SERVER_NAME } from '../../base/mcp-scoping.js';
 import type { McpToolPermissionIndex } from '../../base/mcp-tool-permissions.js';
 import { resolveMcpToolPermission } from '../../base/mcp-tool-permissions.js';
 
@@ -88,8 +89,9 @@ export function createCanUseToolCallback(
       } else if (parts.length >= 3) {
         const serverName = parts[1]; // Extract server name from mcp__<server_name>__<tool_name>
 
-        // Built-in "agor" server is always auto-approved (it's added dynamically, not in DB)
-        if (serverName === 'agor') {
+        // Built-in "agor" server is always auto-approved. Safe because the name
+        // is reserved at config time — a DB server cannot be installed under it.
+        if (serverName === AGOR_MCP_SERVER_NAME) {
           console.log(
             `✅ [canUseTool] Auto-approving MCP tool: ${toolName} (built-in "agor" server)`
           );
