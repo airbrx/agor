@@ -339,8 +339,12 @@ export async function resolveMCPOAuthDiscovery(
 
 /**
  * Fetch Protected Resource Metadata (RFC 9728)
+ *
+ * Exported so callers that only need the authorization server list — the
+ * catalog auth probe, which records which AS an entry delegates to — can reuse
+ * the same fetch and error semantics as the full flow.
  */
-async function fetchResourceMetadata(metadataUrl: string): Promise<OAuthMetadata> {
+export async function fetchResourceMetadata(metadataUrl: string): Promise<OAuthMetadata> {
   const response = await fetch(metadataUrl, { signal: AbortSignal.timeout(15_000) });
   if (!response.ok) {
     throw new Error(

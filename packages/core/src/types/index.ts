@@ -17,6 +17,7 @@ export * from './group';
 export * from './id';
 export * from './knowledge';
 export * from './mcp';
+export * from './mcp-catalog';
 export * from './message';
 export * from './presence';
 export * from './repo';

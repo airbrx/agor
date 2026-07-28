@@ -13,7 +13,7 @@ export interface TenantDatabaseScope {
 }
 
 /** Narrow RLS capabilities available to explicit system database work. */
-export type SystemDatabaseCapability = 'gateway_listener_discovery';
+export type SystemDatabaseCapability = 'gateway_listener_discovery' | 'mcp_catalog_ingestion';
 
 export interface TenantContextScope {
   tenantId: TenantID | string;

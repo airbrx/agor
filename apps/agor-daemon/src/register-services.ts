@@ -113,6 +113,7 @@ import { createKnowledgeSettingsService } from './services/knowledge-settings.js
 import { createKnowledgeVersionsService } from './services/knowledge-versions.js';
 import { createLeaderboardService } from './services/leaderboard.js';
 import { createLocalActionsService } from './services/local-actions.js';
+import { createMCPCatalogService } from './services/mcp-catalog.js';
 import { createMCPServersService } from './services/mcp-servers.js';
 import { createMessagesService } from './services/messages.js';
 import { performOAuthDisconnect } from './services/oauth-disconnect.js';
@@ -1510,6 +1511,10 @@ async function registerMCPServices(
   };
 
   app.use('/mcp-servers', createMCPServersService(db));
+
+  // Read-only marketplace browse surface. Only find/get are exposed; the
+  // catalog's writers are the ingestion job and the curated.yaml seeder.
+  app.use('/mcp-catalog', createMCPCatalogService(db), { methods: ['find', 'get'] });
 
   // JWT test endpoint
   app.use('/mcp-servers/test-jwt', {
