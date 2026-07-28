@@ -287,6 +287,10 @@ describe('setupQuery - Local Settings Support', () => {
     const deps = createMockDeps();
     deps.sessionMCPRepo = {} as any;
     deps.mcpServerRepo = {} as any;
+    // A live approval channel — so "ask" stays promptable rather than blocked.
+    deps.permissionService = {} as any;
+    deps.tasksService = {} as any;
+    deps.messagesRepo = {} as any;
     vi.mocked(getMcpServersForSession).mockResolvedValue([
       {
         server: {
@@ -307,7 +311,9 @@ describe('setupQuery - Local Settings Support', () => {
       } as any,
     ]);
 
-    await setupQuery('test-session' as SessionID, 'test prompt', deps);
+    await setupQuery('test-session' as SessionID, 'test prompt', deps, {
+      taskId: 'test-task' as TaskID,
+    });
 
     const callArgs = vi.mocked(Claude.query).mock.calls[0][0];
     expect(callArgs.options.disallowedTools).toEqual([
@@ -317,6 +323,68 @@ describe('setupQuery - Local Settings Support', () => {
     // An allowlist entry would short-circuit canUseTool, so only ungated
     // tools may appear there.
     expect(callArgs.options.allowedTools).toEqual(['list_issues']);
+  });
+
+  // bypassPermissions is the one mode where canUseTool is never constructed,
+  // so the SDK-level disallow list is the only thing left holding a `deny`.
+  it('still blocks denied MCP tools in bypassPermissions mode', async () => {
+    const deps = createMockDeps();
+    deps.sessionMCPRepo = {} as any;
+    deps.mcpServerRepo = {} as any;
+    deps.permissionService = {} as any;
+    deps.tasksService = {} as any;
+    deps.messagesRepo = {} as any;
+    vi.mocked(getMcpServersForSession).mockResolvedValue([
+      {
+        server: {
+          name: 'github',
+          transport: 'stdio',
+          command: 'npx',
+          tool_permissions: { create_pull_request: 'deny', merge_pull_request: 'ask' },
+        },
+      } as any,
+    ]);
+
+    await setupQuery('test-session' as SessionID, 'test prompt', deps, {
+      taskId: 'test-task' as TaskID,
+      permissionMode: 'bypassPermissions',
+    });
+
+    const callArgs = vi.mocked(Claude.query).mock.calls[0][0];
+    expect(callArgs.options.canUseTool).toBeUndefined();
+    expect(callArgs.options.disallowedTools).toContain('mcp__github__create_pull_request');
+    // No approval channel exists here, so an "ask" tool cannot be answered and
+    // must not degrade into an "allow".
+    expect(callArgs.options.disallowedTools).toContain('mcp__github__merge_pull_request');
+  });
+
+  it('registers the PreToolUse gate only when tool_permissions exist', async () => {
+    const deps = createMockDeps();
+    deps.sessionMCPRepo = {} as any;
+    deps.mcpServerRepo = {} as any;
+    vi.mocked(getMcpServersForSession).mockResolvedValue([
+      { server: { name: 'plain', transport: 'stdio', command: 'npx' } } as any,
+    ]);
+
+    await setupQuery('test-session' as SessionID, 'test prompt', deps);
+    expect(vi.mocked(Claude.query).mock.calls[0][0].options.hooks).toBeUndefined();
+
+    vi.mocked(Claude.query).mockClear();
+    vi.mocked(getMcpServersForSession).mockResolvedValue([
+      {
+        server: {
+          name: 'github',
+          transport: 'stdio',
+          command: 'npx',
+          tool_permissions: { merge_pull_request: 'ask' },
+        },
+      } as any,
+    ]);
+
+    await setupQuery('test-session' as SessionID, 'test prompt', deps);
+
+    const hooks = vi.mocked(Claude.query).mock.calls[0][0].options.hooks as Record<string, unknown>;
+    expect(hooks.PreToolUse).toHaveLength(1);
   });
 
   it('hands the resolved tool_permissions index to the canUseTool callback', async () => {

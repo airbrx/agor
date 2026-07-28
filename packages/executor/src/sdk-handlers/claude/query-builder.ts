@@ -38,10 +38,12 @@ import {
   buildMcpToolPermissionIndex,
   EMPTY_MCP_TOOL_PERMISSION_INDEX,
   listMcpToolsWithPermission,
+  PERMISSIONS_BLOCKED_WITHOUT_PROMPT,
 } from '../base/mcp-tool-permissions.js';
 import { CLAUDE_CODE_DISALLOWED_TOOLS } from './constants.js';
 import { parseModelWithBetas } from './model-utils.js';
 import { DEFAULT_CLAUDE_MODEL } from './models.js';
+import { createMcpToolPermissionHook } from './permissions/mcp-tool-permission-hook.js';
 import { createCanUseToolCallback } from './permissions/permission-hooks.js';
 
 function summarizeMcpConfigCounts(config: unknown): string {
@@ -315,6 +317,17 @@ export async function setupQuery(
       `🔐 Permission mode: ${queryOptions.permissionMode}${permissionMode ? ' (from request)' : ' (from session config)'}`
     );
   }
+
+  // Whether this query will have a live approval channel back to the UI.
+  // Decided up front because MCP `tool_permissions` need it: an "ask" tool with
+  // nowhere to ask has to fail closed rather than silently become "allow".
+  const canPromptForPermission = Boolean(
+    deps.permissionService &&
+      taskId &&
+      deps.sessionMCPRepo &&
+      deps.mcpServerRepo &&
+      effectivePermissionMode !== 'bypassPermissions'
+  );
 
   // Configure effort level — controls reasoning depth via SDK's effort parameter
   // Matches Claude Code CLI's --effort flag (low/medium/high/max)
@@ -616,7 +629,12 @@ export async function setupQuery(
 
           // Denied tools are blocked at the SDK layer as well as in canUseTool,
           // so the model is never even offered a tool the user switched off.
-          for (const tool of listMcpToolsWithPermission(server, ['deny'])) {
+          // Without an approval channel an "ask" tool is unanswerable, so it
+          // joins them rather than degrading to "allow".
+          const blocked = canPromptForPermission
+            ? ['deny' as const]
+            : PERMISSIONS_BLOCKED_WITHOUT_PROMPT;
+          for (const tool of listMcpToolsWithPermission(server, blocked)) {
             deniedTools.push(`mcp__${server.name}__${tool}`);
           }
 
@@ -682,22 +700,28 @@ export async function setupQuery(
   //
   // Skip in bypassPermissions mode: the SDK skips canUseTool there anyway, and
   // we no longer need a workaround to intercept AskUserQuestion (now disallowed).
-  if (
-    deps.permissionService &&
-    taskId &&
-    deps.sessionMCPRepo &&
-    deps.mcpServerRepo &&
-    effectivePermissionMode !== 'bypassPermissions'
-  ) {
-    queryOptions.canUseTool = createCanUseToolCallback(sessionId, taskId, {
-      permissionService: deps.permissionService,
+  // PreToolUse runs ahead of settings.json rule matching, so this is what stops
+  // a stale persisted `allow` rule from skipping an `ask` gate entirely.
+  if (mcpToolPermissions.byTool.size > 0) {
+    queryOptions.hooks = {
+      ...(queryOptions.hooks as Record<string, unknown> | undefined),
+      PreToolUse: [
+        { hooks: [createMcpToolPermissionHook(mcpToolPermissions, canPromptForPermission)] },
+      ],
+    };
+    console.log(`   🪝 MCP tool_permissions PreToolUse gate registered`);
+  }
+
+  if (canPromptForPermission) {
+    queryOptions.canUseTool = createCanUseToolCallback(sessionId, taskId!, {
+      permissionService: deps.permissionService!,
       tasksService: deps.tasksService!,
       messagesRepo: deps.messagesRepo!,
       messagesService: deps.messagesService,
       sessionsService: deps.sessionsService,
       permissionLocks: deps.permissionLocks,
-      mcpServerRepo: deps.mcpServerRepo,
-      sessionMCPRepo: deps.sessionMCPRepo,
+      mcpServerRepo: deps.mcpServerRepo!,
+      sessionMCPRepo: deps.sessionMCPRepo!,
       mcpToolPermissions,
     });
     console.log(`✅ canUseTool callback added (permission mode: ${effectivePermissionMode})`);
