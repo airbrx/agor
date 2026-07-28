@@ -22,6 +22,8 @@ import type {
 } from '../../../db/feathers-repositories.js';
 import type { PermissionService } from '../../../permissions/permission-service.js';
 import type { MessagesService, SessionsPatchClient, TasksService } from '../../base/index.js';
+import type { McpToolPermissionIndex } from '../../base/mcp-tool-permissions.js';
+import { resolveMcpToolPermission } from '../../base/mcp-tool-permissions.js';
 
 /**
  * Create canUseTool callback for permission handling
@@ -42,6 +44,8 @@ export function createCanUseToolCallback(
     permissionLocks: Map<SessionID, Promise<void>>;
     mcpServerRepo: MCPServerRepository;
     sessionMCPRepo: SessionMCPServerRepository;
+    /** Per-tool `tool_permissions` from the session's resolved MCP servers. */
+    mcpToolPermissions: McpToolPermissionIndex;
   }
 ) {
   return async (
@@ -62,8 +66,26 @@ export function createCanUseToolCallback(
     // Auto-approve MCP tools only if they belong to an attached MCP server
     // MCP tool names follow pattern: mcp__<server_name>__<tool_name>
     if (toolName.startsWith('mcp__')) {
+      // Per-tool `tool_permissions` outrank every fast-path below: a denied tool
+      // must never reach the MCP server, and an `ask` tool must never be
+      // auto-approved just because its server is attached.
+      const configuredPermission = resolveMcpToolPermission(deps.mcpToolPermissions, toolName);
+
+      if (configuredPermission === 'deny') {
+        console.warn(`🛑 [canUseTool] MCP tool "${toolName}" denied by tool_permissions`);
+        return {
+          behavior: 'deny' as const,
+          message: `Tool "${toolName}" is denied by its MCP server's tool permissions.`,
+        };
+      }
+
       const parts = toolName.split('__');
-      if (parts.length >= 3) {
+      if (configuredPermission === 'ask') {
+        console.log(
+          `❓ [canUseTool] MCP tool "${toolName}" set to "ask" by tool_permissions, prompting user`
+        );
+        // Fall through to normal permission flow
+      } else if (parts.length >= 3) {
         const serverName = parts[1]; // Extract server name from mcp__<server_name>__<tool_name>
 
         // Built-in "agor" server is always auto-approved (it's added dynamically, not in DB)

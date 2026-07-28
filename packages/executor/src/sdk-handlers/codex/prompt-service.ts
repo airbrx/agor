@@ -32,7 +32,12 @@ import { Codex } from '@agor/core/sdk';
 import { renderAgorSystemPrompt } from '@agor/core/templates/session-context';
 import { mergeMCPRemoteHeaders } from '@agor/core/tools/mcp/http-headers';
 import { resolveMCPAuthHeaders } from '@agor/core/tools/mcp/jwt-auth';
-import type { CodexSandboxMode, ContextUsageSnapshot, EffortLevel } from '@agor/core/types';
+import type {
+  CodexSandboxMode,
+  ContextUsageSnapshot,
+  EffortLevel,
+  MCPServer,
+} from '@agor/core/types';
 import { getDefaultPermissionMode, isGatewaySession } from '@agor/core/types';
 import { mapToCodexPermissionConfig } from '@agor/core/utils/permission-mode-mapper';
 import { getDaemonUrl } from '../../config.js';
@@ -52,6 +57,10 @@ import type { PermissionMode, SessionID, TaskID, UserID } from '../../types.js';
 import { resolveContextUserId } from '../base/context-user.js';
 import type { TasksService } from '../base/index.js';
 import { getMcpServersForSession } from '../base/mcp-scoping.js';
+import {
+  listMcpToolsWithPermission,
+  PERMISSIONS_BLOCKED_WITHOUT_PROMPT,
+} from '../base/mcp-tool-permissions.js';
 import { forkCodexThreadViaAppServer } from './app-server-client.js';
 import { extractCodexContextSnapshotFromEvent, extractCodexTokenUsage } from './usage.js';
 
@@ -91,6 +100,7 @@ type CodexConfigValue = CodexConfigObject[string];
  * clears the prompt.
  */
 const MCP_AUTO_APPROVE: CodexConfigObject = { default_tools_approval_mode: 'approve' };
+
 const GATEWAY_MCP_STARTUP_TIMEOUT_MS = 30_000;
 
 const DEBUG_CODEX = process.env.AGOR_DEBUG_CODEX === '1' || process.env.DEBUG?.includes('codex');
@@ -105,6 +115,30 @@ function applyGatewayMcpStartupGuard(config: CodexConfigObject, requireMcpServer
   if (!requireMcpServers) return;
   config.required = true;
   config.startup_timeout_ms = GATEWAY_MCP_STARTUP_TIMEOUT_MS;
+}
+
+/**
+ * Apply the server's `tool_permissions` to its Codex config.
+ *
+ * Codex's approval mode is per-server, not per-tool, so a gated tool cannot be
+ * singled out for a prompt — and `exec --json` has no channel to prompt on
+ * anyway (see `MCP_AUTO_APPROVE`). `disabled_tools` is the only per-tool lever
+ * Codex exposes, so both `deny` and `ask` fail closed there; `allow` and
+ * unlisted tools keep the server-wide auto-approve.
+ */
+function applyMcpToolPermissions(config: CodexConfigObject, server: MCPServer): void {
+  const blocked = listMcpToolsWithPermission(server, PERMISSIONS_BLOCKED_WITHOUT_PROMPT);
+  if (blocked.length === 0) return;
+
+  config.disabled_tools = blocked as CodexConfigValue[];
+
+  const asked = listMcpToolsWithPermission(server, ['ask']);
+  console.warn(
+    `   ⛔ [Codex MCP] Disabling ${blocked.length} tool(s) on "${server.name}" per tool_permissions` +
+      (asked.length > 0
+        ? ` (${asked.length} set to "ask"; Codex runs headless with no approval prompt, so they fail closed)`
+        : '')
+  );
 }
 
 function getCodexHome(): string {
@@ -687,6 +721,7 @@ export class CodexPromptService {
 
       const serverConfig: CodexConfigObject = { ...MCP_AUTO_APPROVE };
       applyGatewayMcpStartupGuard(serverConfig, requireMcpServers);
+      applyMcpToolPermissions(serverConfig, server);
       codexDebug(`   📝 [Codex MCP] Configuring STDIO server: ${server.name} -> ${serverName}`);
       if (server.command) {
         serverConfig.command = server.command;
@@ -712,6 +747,7 @@ export class CodexPromptService {
       );
 
       const serverConfig: CodexConfigObject = { ...MCP_AUTO_APPROVE };
+      applyMcpToolPermissions(serverConfig, server);
       let canRequireServer = requireMcpServers;
       codexDebug(`   📝 [Codex MCP] Configuring HTTP server: ${server.name} -> ${serverName}`);
       if (server.url) {

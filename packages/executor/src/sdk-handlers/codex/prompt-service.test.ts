@@ -2201,6 +2201,69 @@ describe('CodexPromptService - buildMcpServersConfig', () => {
     }
   });
 
+  it('disables denied and ask-gated tools per tool_permissions', async () => {
+    mcpScopingMocks.getMcpServersForSession.mockResolvedValue([
+      {
+        server: {
+          name: 'github',
+          transport: 'stdio',
+          command: 'npx',
+          tool_permissions: {
+            create_pull_request: 'deny',
+            merge_pull_request: 'ask',
+            list_issues: 'allow',
+          },
+        },
+      },
+      {
+        server: {
+          name: 'linear',
+          transport: 'http',
+          url: 'https://mcp.linear.app/sse',
+          tool_permissions: { delete_issue: 'deny' },
+        },
+      },
+    ]);
+
+    const service = makeService();
+    const { servers } = await (service as any).buildMcpServersConfig(
+      '019e3700-aaaa-bbbb-cccc-dddddddddddd',
+      undefined,
+      undefined
+    );
+
+    // Codex approval mode is per-server, so `ask` has no prompt to route to
+    // and fails closed alongside `deny`.
+    expect(servers.github.disabled_tools).toEqual(['create_pull_request', 'merge_pull_request']);
+    expect(servers.linear.disabled_tools).toEqual(['delete_issue']);
+  });
+
+  it('leaves disabled_tools unset for servers with no tool_permissions', async () => {
+    mcpScopingMocks.getMcpServersForSession.mockResolvedValue([
+      {
+        server: {
+          name: 'github',
+          transport: 'stdio',
+          command: 'npx',
+          tool_permissions: { list_issues: 'allow' },
+        },
+      },
+      {
+        server: { name: 'linear', transport: 'http', url: 'https://mcp.linear.app/sse' },
+      },
+    ]);
+
+    const service = makeService();
+    const { servers } = await (service as any).buildMcpServersConfig(
+      '019e3700-aaaa-bbbb-cccc-dddddddddddd',
+      undefined,
+      undefined
+    );
+
+    expect(servers.github.disabled_tools).toBeUndefined();
+    expect(servers.linear.disabled_tools).toBeUndefined();
+  });
+
   it('marks built-in Agor MCP required for gateway sessions', async () => {
     const service = makeService();
     const { servers, total } = await (service as any).buildMcpServersConfig(

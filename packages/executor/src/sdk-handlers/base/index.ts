@@ -8,6 +8,7 @@
 export { normalizeRawSdkResponse } from '../normalizer-factory.js';
 export * from './context-user.js';
 export * from './mcp-scoping.js';
+export * from './mcp-tool-permissions.js';
 export * from './model-recording.js';
 export * from './normalizer.interface.js';
 export * from './service-clients.js';

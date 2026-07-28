@@ -40,7 +40,12 @@ import type { PermissionMode, SessionID, TaskID, UserID } from '../../types.js';
 import { resolveContextUserId } from '../base/context-user.js';
 import type { TasksService } from '../base/index.js';
 import { getMcpServersForSession } from '../base/mcp-scoping.js';
+import {
+  listMcpToolsWithPermission,
+  PERMISSIONS_BLOCKED_WITHOUT_PROMPT,
+} from '../base/mcp-tool-permissions.js';
 import { convertConversationToHistory } from './conversation-converter.js';
+import { buildGeminiMcpServerConfig } from './mcp-server-config.js';
 import { DEFAULT_GEMINI_MODEL, type GeminiModel } from './models.js';
 import { mapPermissionMode } from './permission-mapper.js';
 import { extractGeminiTokenUsage } from './usage.js';
@@ -754,35 +759,45 @@ export class GeminiPromptService {
             );
           }
 
+          const excludeTools = listMcpToolsWithPermission(
+            server,
+            PERMISSIONS_BLOCKED_WITHOUT_PROMPT
+          );
+
           // Convert Agor's MCP server format to Gemini SDK's MCPServerConfig
           if (server.transport === 'stdio') {
-            mcpServersConfig[server.name] = new Gemini.MCPServerConfig(
-              server.command,
-              server.args || [],
-              server.env || {},
-              workingDirectory // Use branch path as cwd
-            );
+            mcpServersConfig[server.name] = buildGeminiMcpServerConfig({
+              command: server.command,
+              args: server.args || [],
+              env: server.env || {},
+              cwd: workingDirectory, // Use branch path as cwd
+              excludeTools,
+            });
           } else if (server.transport === 'http') {
             // HTTP transport: use httpUrl parameter
-            mcpServersConfig[server.name] = new Gemini.MCPServerConfig(
-              undefined, // command
-              undefined, // args
-              server.env || {},
-              undefined, // cwd
-              undefined, // url (websocket)
-              server.url, // httpUrl
-              headers
-            );
+            mcpServersConfig[server.name] = buildGeminiMcpServerConfig({
+              env: server.env || {},
+              httpUrl: server.url,
+              headers,
+              excludeTools,
+            });
           } else if (server.transport === 'sse') {
             // SSE transport: use url parameter (websocket/sse)
-            mcpServersConfig[server.name] = new Gemini.MCPServerConfig(
-              undefined, // command
-              undefined, // args
-              server.env || {},
-              undefined, // cwd
-              server.url, // url (websocket/sse)
-              undefined,
-              headers
+            mcpServersConfig[server.name] = buildGeminiMcpServerConfig({
+              env: server.env || {},
+              url: server.url, // url (websocket/sse)
+              headers,
+              excludeTools,
+            });
+          }
+
+          if (excludeTools.length > 0) {
+            const asked = listMcpToolsWithPermission(server, ['ask']);
+            console.warn(
+              `   ⛔ [Gemini] Excluding ${excludeTools.length} tool(s) on "${server.name}" per tool_permissions` +
+                (asked.length > 0
+                  ? ` (${asked.length} set to "ask"; Gemini runs headless with no approval prompt, so they fail closed)`
+                  : '')
             );
           }
 

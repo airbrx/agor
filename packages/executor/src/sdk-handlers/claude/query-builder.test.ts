@@ -45,7 +45,9 @@ vi.mock('./permissions/permission-hooks.js', () => ({
 import { Claude } from '@agor/core/sdk';
 import { resolveMCPAuthHeaders } from '@agor/core/tools/mcp/jwt-auth';
 import { getMcpServersForSession } from '../base/mcp-scoping.js';
+import { resolveMcpToolPermission } from '../base/mcp-tool-permissions.js';
 import { CLAUDE_CODE_DISALLOWED_TOOLS } from './constants.js';
+import { createCanUseToolCallback } from './permissions/permission-hooks.js';
 import { formatListForLog, type QuerySetupDeps, setupQuery } from './query-builder.js';
 
 describe('MCP logging helpers', () => {
@@ -279,6 +281,70 @@ describe('setupQuery - Local Settings Support', () => {
     expect(mcpServers.agor).toMatchObject({ alwaysLoad: true });
     expect(mcpServers.bearerRemote.alwaysLoad).toBeUndefined();
     expect(mcpServers.jwtRemote.alwaysLoad).toBeUndefined();
+  });
+
+  it('blocks tool_permissions denies at the SDK layer and keeps gated tools off the allowlist', async () => {
+    const deps = createMockDeps();
+    deps.sessionMCPRepo = {} as any;
+    deps.mcpServerRepo = {} as any;
+    vi.mocked(getMcpServersForSession).mockResolvedValue([
+      {
+        server: {
+          name: 'github',
+          transport: 'stdio',
+          command: 'npx',
+          tools: [
+            { name: 'create_pull_request' },
+            { name: 'merge_pull_request' },
+            { name: 'list_issues' },
+          ],
+          tool_permissions: {
+            create_pull_request: 'deny',
+            merge_pull_request: 'ask',
+            list_issues: 'allow',
+          },
+        },
+      } as any,
+    ]);
+
+    await setupQuery('test-session' as SessionID, 'test prompt', deps);
+
+    const callArgs = vi.mocked(Claude.query).mock.calls[0][0];
+    expect(callArgs.options.disallowedTools).toEqual([
+      ...CLAUDE_CODE_DISALLOWED_TOOLS,
+      'mcp__github__create_pull_request',
+    ]);
+    // An allowlist entry would short-circuit canUseTool, so only ungated
+    // tools may appear there.
+    expect(callArgs.options.allowedTools).toEqual(['list_issues']);
+  });
+
+  it('hands the resolved tool_permissions index to the canUseTool callback', async () => {
+    const deps = createMockDeps();
+    deps.sessionMCPRepo = {} as any;
+    deps.mcpServerRepo = {} as any;
+    deps.permissionService = {} as any;
+    deps.tasksService = {} as any;
+    deps.messagesRepo = {} as any;
+    vi.mocked(getMcpServersForSession).mockResolvedValue([
+      {
+        server: {
+          name: 'github',
+          transport: 'stdio',
+          command: 'npx',
+          tool_permissions: { create_pull_request: 'deny' },
+        },
+      } as any,
+    ]);
+
+    await setupQuery('test-session' as SessionID, 'test prompt', deps, {
+      taskId: 'test-task' as TaskID,
+    });
+
+    const hookDeps = vi.mocked(createCanUseToolCallback).mock.calls[0][2];
+    expect(
+      resolveMcpToolPermission(hookDeps.mcpToolPermissions, 'mcp__github__create_pull_request')
+    ).toBe('deny');
   });
 
   it('passes session advisorModel through the --advisor CLI flag, NOT settings', async () => {
