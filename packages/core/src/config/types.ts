@@ -977,6 +977,29 @@ export interface AgorMultiTenancySettings {
 /**
  * Complete Agor configuration
  */
+/**
+ * MCP marketplace catalog settings.
+ *
+ * The catalog mirrors the public MCP registry, which means the daemon makes
+ * periodic outbound requests to a third party and, during the auth probe, to
+ * arbitrary registry-published hosts. Air-gapped and network-restricted
+ * installs need an off switch for that; the curated overlay shipped in the
+ * repository still seeds, so the marketplace stays usable offline.
+ */
+export interface AgorMCPCatalogSettings {
+  /** Sync the public MCP registry into the catalog (default: true). */
+  registry_sync_enabled?: boolean;
+
+  /** Hours between registry syncs (default: 6). */
+  sync_interval_hours?: number;
+
+  /** Entries auth-probed per sync (default: 40). Set 0 to disable probing. */
+  probe_budget?: number;
+
+  /** Advanced override for the registry base URL. Usually omitted. */
+  registry_url?: string;
+}
+
 export interface AgorConfig {
   /** Daemon settings */
   daemon?: AgorDaemonSettings;
@@ -1010,6 +1033,9 @@ export interface AgorConfig {
 
   /** App-level multi-tenancy settings. Defaults to static/default tenant. */
   multi_tenancy?: AgorMultiTenancySettings;
+
+  /** MCP marketplace catalog ingestion settings. */
+  mcp_catalog?: AgorMCPCatalogSettings;
 }
 
 /**
@@ -1026,4 +1052,5 @@ export type ConfigKey =
   | `paths.${keyof AgorPathSettings}`
   | `analytics.${keyof AgorAnalyticsSettings}`
   | `telemetry.${keyof AgorTelemetrySettings}`
-  | `multi_tenancy.${keyof AgorMultiTenancySettings}`;
+  | `multi_tenancy.${keyof AgorMultiTenancySettings}`
+  | `mcp_catalog.${keyof AgorMCPCatalogSettings}`;
