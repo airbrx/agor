@@ -38,6 +38,7 @@ import {
   buildMcpToolPermissionIndex,
   EMPTY_MCP_TOOL_PERMISSION_INDEX,
   listMcpToolsWithPermission,
+  mcpToolNameAliasesForServer,
   PERMISSIONS_BLOCKED_WITHOUT_PROMPT,
 } from '../base/mcp-tool-permissions.js';
 import { CLAUDE_CODE_DISALLOWED_TOOLS } from './constants.js';
@@ -557,14 +558,26 @@ export async function setupQuery(
           mcpOAuthAuthHeadersRepo: deps.mcpOAuthAuthHeadersRepo,
           forUserId: contextUserId,
         },
-        { toolFiltering: 'exclude', interactiveApproval: canPromptForPermission }
+        { toolFiltering: 'exclude' }
       );
+
+      // The built-in Agor server carries this session's daemon bearer token and
+      // is auto-approved by name in canUseTool. Drop any DB server claiming that
+      // name before anything reads the list, so it can neither be configured nor
+      // contribute permissions that would gate the genuine built-in's tools.
+      const attachableServers = serversWithSource.filter(({ server }) => {
+        if (server.name !== AGOR_MCP_SERVER_NAME) return true;
+        console.warn(
+          `   ⚠️  Skipping MCP server "${server.name}": reserved for the built-in Agor MCP server`
+        );
+        return false;
+      });
 
       mcpToolPermissions = buildMcpToolPermissionIndex(
-        serversWithSource.map(({ server }) => server)
+        attachableServers.map(({ server }) => server)
       );
 
-      if (serversWithSource.length > 0) {
+      if (attachableServers.length > 0) {
         // Convert to SDK format
         const mcpConfig: MCPServersConfig = {};
         const deniedTools: string[] = [];
@@ -574,17 +587,7 @@ export async function setupQuery(
         const missingAuthServers: string[] = [];
         const unresolvedAuthServers: string[] = [];
 
-        for (const { server } of serversWithSource) {
-          // The built-in Agor server carries this session's daemon bearer token
-          // and is auto-approved by name in canUseTool. A DB server claiming the
-          // same key would inherit both, so it never gets to.
-          if (server.name === AGOR_MCP_SERVER_NAME) {
-            console.warn(
-              `   ⚠️  Skipping MCP server "${server.name}": reserved for the built-in Agor MCP server`
-            );
-            continue;
-          }
-
+        for (const { server } of attachableServers) {
           // Infer transport if missing (backwards compatibility)
           const transport = server.transport || (server.url ? 'sse' : 'stdio');
           if (transport === 'stdio') {
@@ -648,7 +651,13 @@ export async function setupQuery(
             ? ['deny' as const]
             : PERMISSIONS_BLOCKED_WITHOUT_PROMPT;
           for (const tool of listMcpToolsWithPermission(server, blocked)) {
-            deniedTools.push(`mcp__${server.name}__${tool}`);
+            // The CLI rewrites a server name into the tool-name alphabet before
+            // it reaches a rule, so a name with punctuation would never match if
+            // only the raw form were listed. Both forms are emitted; a rule that
+            // matches nothing is inert.
+            for (const alias of new Set(mcpToolNameAliasesForServer(server.name))) {
+              deniedTools.push(`mcp__${alias}__${tool}`);
+            }
           }
         }
 
@@ -659,7 +668,7 @@ export async function setupQuery(
         };
         // Log one safe summary line. Env/header values may contain secrets after template resolution.
         console.log(
-          `   🔧 MCP servers configured: total=${serversWithSource.length} remote=${remoteServerCount} ` +
+          `   🔧 MCP servers configured: total=${attachableServers.length} remote=${remoteServerCount} ` +
             `stdio=${stdioServerCount} headers=${serversWithHeaders} missing_auth=${missingAuthServers.length} ` +
             `auth_errors=${unresolvedAuthServers.length}`
         );
@@ -698,7 +707,7 @@ export async function setupQuery(
   // we no longer need a workaround to intercept AskUserQuestion (now disallowed).
   // PreToolUse runs ahead of settings.json rule matching, so this is what stops
   // a stale persisted `allow` rule from skipping an `ask` gate entirely.
-  if (mcpToolPermissions.byTool.size > 0) {
+  if (mcpToolPermissions.byServer.size > 0) {
     queryOptions.hooks = {
       ...(queryOptions.hooks as Record<string, unknown> | undefined),
       PreToolUse: [

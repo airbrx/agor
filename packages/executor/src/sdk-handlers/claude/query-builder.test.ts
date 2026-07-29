@@ -407,6 +407,88 @@ describe('setupQuery - Local Settings Support', () => {
     expect(callArgs.options.disallowedTools).toContain('mcp__github__merge_pull_request');
   });
 
+  // "foo.bar" and "foo_bar" rewrite to the same SDK name. The deny must survive
+  // whichever server the SDK's rewrite happens to land on.
+  it('emits deny rules under every name form a colliding server can surface as', async () => {
+    const deps = createMockDeps();
+    deps.sessionMCPRepo = {} as any;
+    deps.mcpServerRepo = {} as any;
+    deps.permissionService = {} as any;
+    deps.tasksService = {} as any;
+    deps.messagesRepo = {} as any;
+    vi.mocked(getMcpServersForSession).mockResolvedValue([
+      {
+        server: {
+          name: 'foo.bar',
+          transport: 'stdio',
+          command: 'npx',
+          tool_permissions: { write_file: 'deny' },
+        },
+      } as any,
+      {
+        server: {
+          name: 'foo_bar',
+          transport: 'stdio',
+          command: 'npx',
+          tool_permissions: { read_file: 'allow' },
+        },
+      } as any,
+    ]);
+
+    await setupQuery('test-session' as SessionID, 'test prompt', deps, {
+      taskId: 'test-task' as TaskID,
+    });
+
+    const callArgs = vi.mocked(Claude.query).mock.calls[0][0];
+    const disallowed = callArgs.options.disallowedTools as string[];
+    expect(disallowed).toContain('mcp__foo.bar__write_file');
+    expect(disallowed).toContain('mcp__foo_bar__write_file');
+
+    // ...and the runtime gate agrees with the SDK-layer one.
+    const hookDeps = vi.mocked(createCanUseToolCallback).mock.calls[0][2];
+    expect(resolveMcpToolPermission(hookDeps.mcpToolPermissions, 'mcp__foo_bar__write_file')).toBe(
+      'deny'
+    );
+  });
+
+  // A DB row claiming the reserved name is discarded, so it must not be able to
+  // gate the genuine built-in server's tools either.
+  it('ignores tool_permissions from a DB server claiming the reserved "agor" name', async () => {
+    const deps = createMockDeps();
+    vi.mocked(deps.sessionsRepo.findById).mockResolvedValue({
+      session_id: 'test-session' as SessionID,
+      branch_id: 'test-branch' as BranchID,
+      mcp_token: 'test-token',
+    } as any);
+    deps.sessionMCPRepo = {} as any;
+    deps.mcpServerRepo = {} as any;
+    deps.permissionService = {} as any;
+    deps.tasksService = {} as any;
+    deps.messagesRepo = {} as any;
+    vi.mocked(getMcpServersForSession).mockResolvedValue([
+      {
+        server: {
+          name: 'agor',
+          transport: 'http',
+          url: 'https://attacker.example.com/mcp',
+          tool_permissions: { agor_sessions_prompt: 'deny' },
+        },
+      } as any,
+    ]);
+
+    await setupQuery('test-session' as SessionID, 'test prompt', deps, {
+      taskId: 'test-task' as TaskID,
+    });
+
+    const callArgs = vi.mocked(Claude.query).mock.calls[0][0];
+    expect(callArgs.options.disallowedTools).toEqual([...CLAUDE_CODE_DISALLOWED_TOOLS]);
+
+    const hookDeps = vi.mocked(createCanUseToolCallback).mock.calls[0][2];
+    expect(
+      resolveMcpToolPermission(hookDeps.mcpToolPermissions, 'mcp__agor__agor_sessions_prompt')
+    ).toBeUndefined();
+  });
+
   it('registers the PreToolUse gate only when tool_permissions exist', async () => {
     const deps = createMockDeps();
     deps.sessionMCPRepo = {} as any;

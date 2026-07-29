@@ -678,7 +678,7 @@ export class CodexPromptService {
         forUserId,
       },
       // `exec --json` has no channel to answer an approval prompt on.
-      { toolFiltering: 'exclude', interactiveApproval: false }
+      { toolFiltering: 'exclude' }
     );
 
     const mcpServers = serversWithSource.map((s) => s.server);

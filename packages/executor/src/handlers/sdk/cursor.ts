@@ -217,7 +217,7 @@ async function buildCursorMcpServers(args: {
     },
     // @cursor/sdk exposes no per-tool filter and runs autonomously, so a server
     // that gates tools cannot be honoured and is withheld instead.
-    { toolFiltering: 'none', interactiveApproval: false }
+    { toolFiltering: 'none' }
   );
 
   for (const { server } of serversWithSource) {

@@ -188,9 +188,9 @@ export class CopilotPromptService {
         mcpOAuthAuthHeadersRepo: this.mcpOAuthAuthHeadersRepo,
         forUserId,
       },
-      // Copilot's per-server `tools` is an include-list, and permission
-      // requests reach the UI via onPermissionRequest.
-      { toolFiltering: 'include', interactiveApproval: true }
+      // Copilot's per-server `tools` is an include-list, so gating a tool means
+      // enumerating the survivors — which needs a discovered tool list.
+      { toolFiltering: 'include' }
     );
 
     const mcpServers = serversWithSource.map((s) => s.server);

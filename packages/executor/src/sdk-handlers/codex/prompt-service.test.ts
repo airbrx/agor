@@ -2113,7 +2113,7 @@ describe('CodexPromptService - buildMcpServersConfig', () => {
         forUserId: '019e3700-user-user-user-user00000001',
       }),
       // Codex can drop individual tools but has no way to prompt.
-      { toolFiltering: 'exclude', interactiveApproval: false }
+      { toolFiltering: 'exclude' }
     );
   });
 

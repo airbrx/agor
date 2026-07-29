@@ -453,7 +453,7 @@ describe('OpenCodeTool', () => {
         },
         // OpenCode can neither filter tools nor prompt, so gated servers are
         // withheld from it entirely.
-        { toolFiltering: 'none', interactiveApproval: false }
+        { toolFiltering: 'none' }
       );
 
       // Should have injected stdio server as local

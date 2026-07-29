@@ -2,18 +2,17 @@
  * Per-tool MCP permission resolution.
  *
  * `mcp_servers.data.tool_permissions` is keyed on the BARE tool name exactly as
- * the MCP server advertises it (`create_pull_request`). Every agent SDK exposes
- * that tool to the model under a server-qualified name, and each one qualifies
- * differently:
+ * the MCP server advertises it (`create_pull_request`). Handlers that gate tools
+ * through per-server config (Gemini `excludeTools`, Codex `disabled_tools`,
+ * Copilot `tools`) use those keys directly and only need
+ * `listMcpToolsWithPermission`.
  *
- * - Claude Code: `mcp__<server>__<tool>` (see `canUseTool` in permission-hooks)
- * - Gemini CLI:  bare `<tool>`, promoted to `<server>__<tool>` only when two
- *                servers advertise the same tool name
- * - Codex:       per-server `disabled_tools`, so bare names are used directly
- *
- * The index below closes that gap: it is built from the resolved MCP server
- * list and answers "what did the user configure for the tool the SDK just
- * named?" for any of those shapes.
+ * The index exists for the one handler that must decide at call time from a
+ * name the SDK invented: Claude, which surfaces MCP tools as
+ * `mcp__<server>__<tool>`. Lookups are therefore always server-qualified —
+ * there is deliberately no bare-name fallback, because a bare key could only
+ * match a qualified string by coincidence, and that coincidence would deny an
+ * unrelated tool.
  */
 
 import type { MCPServer, ToolPermission } from '@agor/core/types';
@@ -45,8 +44,6 @@ export interface HandlerPermissionCapabilities {
    * - `none`: no per-tool control at all (Cursor, OpenCode)
    */
   toolFiltering: 'exclude' | 'include' | 'none';
-  /** Whether the handler can put an approval prompt in front of a human. */
-  interactiveApproval: boolean;
 }
 
 /**
@@ -74,22 +71,16 @@ export function canEnforceMcpToolPermissions(
   }
 }
 
-/**
- * Ranked most-permissive-first. When a bare tool name is ambiguous across
- * servers the most restrictive configured value wins.
- */
+/** Ranked most-permissive-first, so a larger value is the safer answer. */
 const RESTRICTIVENESS: Record<ToolPermission, number> = { allow: 0, ask: 1, deny: 2 };
 
 export interface McpToolPermissionIndex {
-  /** Server name (raw and SDK-sanitized) → bare tool name → permission. */
+  /** Server name (raw and SDK-rewritten) → bare tool name → permission. */
   readonly byServer: ReadonlyMap<string, ReadonlyMap<string, ToolPermission>>;
-  /** Bare tool name → most restrictive permission configured on any server. */
-  readonly byTool: ReadonlyMap<string, ToolPermission>;
 }
 
 export const EMPTY_MCP_TOOL_PERMISSION_INDEX: McpToolPermissionIndex = {
   byServer: new Map(),
-  byTool: new Map(),
 };
 
 /**
@@ -102,7 +93,7 @@ export const EMPTY_MCP_TOOL_PERMISSION_INDEX: McpToolPermissionIndex = {
  * make the index miss, and a miss reads as "unconfigured", i.e. allow. Codex
  * also lowercases, so that variant is indexed too.
  */
-function serverNameAliases(name: string): string[] {
+export function mcpToolNameAliasesForServer(name: string): string[] {
   const sanitized = name.replace(/[^a-zA-Z0-9_-]/g, '_');
   return [name, sanitized, sanitized.toLowerCase()];
 }
@@ -122,26 +113,30 @@ export function listMcpToolsWithPermission(
 
 export function buildMcpToolPermissionIndex(servers: MCPServer[]): McpToolPermissionIndex {
   const byServer = new Map<string, Map<string, ToolPermission>>();
-  const byTool = new Map<string, ToolPermission>();
 
   for (const server of servers) {
     const configured = server.tool_permissions;
     if (!configured || Object.keys(configured).length === 0) continue;
 
-    const tools = new Map<string, ToolPermission>(Object.entries(configured));
-    for (const alias of new Set(serverNameAliases(server.name))) {
-      byServer.set(alias, tools);
-    }
-
-    for (const [toolName, permission] of tools) {
-      const current = byTool.get(toolName);
-      if (!current || RESTRICTIVENESS[permission] > RESTRICTIVENESS[current]) {
-        byTool.set(toolName, permission);
+    for (const alias of new Set(mcpToolNameAliasesForServer(server.name))) {
+      // Two servers can share an alias ("foo.bar" and "foo_bar" both rewrite to
+      // "foo_bar"). Overwriting would drop the first server's denials on the
+      // floor, so entries merge and the most restrictive value survives.
+      let tools = byServer.get(alias);
+      if (!tools) {
+        tools = new Map<string, ToolPermission>();
+        byServer.set(alias, tools);
+      }
+      for (const [toolName, permission] of Object.entries(configured)) {
+        const current = tools.get(toolName);
+        if (!current || RESTRICTIVENESS[permission] > RESTRICTIVENESS[current]) {
+          tools.set(toolName, permission);
+        }
       }
     }
   }
 
-  return { byServer, byTool };
+  return { byServer };
 }
 
 /**
@@ -167,10 +162,8 @@ export function resolveMcpToolPermission(
     }
   }
 
-  if (matchedServerName) {
-    const bareName = qualified.slice(matchedServerName.length + SEPARATOR.length);
-    return index.byServer.get(matchedServerName)?.get(bareName);
-  }
+  if (!matchedServerName) return undefined;
 
-  return index.byTool.get(qualified);
+  const bareName = qualified.slice(matchedServerName.length + SEPARATOR.length);
+  return index.byServer.get(matchedServerName)?.get(bareName);
 }

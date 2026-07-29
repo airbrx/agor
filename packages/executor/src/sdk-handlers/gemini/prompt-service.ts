@@ -748,7 +748,7 @@ export class GeminiPromptService {
             forUserId: contextUserId,
           },
           // The scheduler runs headless; ToolCallConfirmation has no consumer.
-          { toolFiltering: 'exclude', interactiveApproval: false }
+          { toolFiltering: 'exclude' }
         );
 
         // Convert to Gemini SDK format

@@ -48,11 +48,6 @@ describe('resolveMcpToolPermission', () => {
     expect(resolveMcpToolPermission(index, 'mcp__linear__create_issue')).toBe('allow');
   });
 
-  it('maps a Gemini bare tool name', () => {
-    expect(resolveMcpToolPermission(index, 'create_pull_request')).toBe('deny');
-    expect(resolveMcpToolPermission(index, 'create_issue')).toBe('allow');
-  });
-
   it('maps a Gemini server-qualified tool name', () => {
     expect(resolveMcpToolPermission(index, 'github__create_pull_request')).toBe('deny');
   });
@@ -102,15 +97,38 @@ describe('resolveMcpToolPermission', () => {
     expect(resolveMcpToolPermission(dotted, 'my_server__run_query')).toBe('deny');
   });
 
-  it('takes the most restrictive value when a bare name is ambiguous across servers', () => {
-    const ambiguous = buildMcpToolPermissionIndex([
-      server('a', { search: 'allow' }),
-      server('b', { search: 'deny' }),
-      server('c', { search: 'ask' }),
+  it('never matches a bare tool name, so an unrelated tool cannot be denied by coincidence', () => {
+    expect(resolveMcpToolPermission(index, 'create_pull_request')).toBeUndefined();
+  });
+
+  // "foo.bar" and "foo_bar" both rewrite to "foo_bar". Overwriting the shared
+  // entry silently dropped the first server's denials, which the SDK would then
+  // surface as unconfigured, i.e. allowed.
+  it('merges servers whose names rewrite to the same alias instead of overwriting', () => {
+    const colliding = buildMcpToolPermissionIndex([
+      server('foo.bar', { write_file: 'deny' }),
+      server('foo_bar', { read_file: 'allow' }),
     ]);
 
-    expect(resolveMcpToolPermission(ambiguous, 'search')).toBe('deny');
-    // Server-qualified lookups stay exact — restrictiveness only breaks ties.
-    expect(resolveMcpToolPermission(ambiguous, 'mcp__a__search')).toBe('allow');
+    expect(resolveMcpToolPermission(colliding, 'mcp__foo_bar__write_file')).toBe('deny');
+    expect(resolveMcpToolPermission(colliding, 'mcp__foo_bar__read_file')).toBe('allow');
+  });
+
+  it('keeps the most restrictive value when colliding aliases disagree', () => {
+    const colliding = buildMcpToolPermissionIndex([
+      server('a.b', { search: 'allow' }),
+      server('a_b', { search: 'deny' }),
+    ]);
+
+    expect(resolveMcpToolPermission(colliding, 'mcp__a_b__search')).toBe('deny');
+  });
+
+  it('is order-independent across colliding aliases', () => {
+    const reversed = buildMcpToolPermissionIndex([
+      server('a_b', { search: 'deny' }),
+      server('a.b', { search: 'allow' }),
+    ]);
+
+    expect(resolveMcpToolPermission(reversed, 'mcp__a_b__search')).toBe('deny');
   });
 });

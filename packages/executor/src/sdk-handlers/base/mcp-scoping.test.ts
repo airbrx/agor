@@ -4,10 +4,7 @@ import { getMcpServersForSession } from './mcp-scoping';
 import type { HandlerPermissionCapabilities } from './mcp-tool-permissions';
 
 /** A handler that can honour anything — keeps existing cases about scoping only. */
-const ENFORCING: HandlerPermissionCapabilities = {
-  toolFiltering: 'exclude',
-  interactiveApproval: true,
-};
+const ENFORCING: HandlerPermissionCapabilities = { toolFiltering: 'exclude' };
 
 const makeServer = (id: string, scope: MCPServer['scope'], name = id): MCPServer =>
   ({
@@ -190,10 +187,7 @@ describe('getMcpServersForSession - tool_permissions admission gate', () => {
   it('withholds a gated server from a handler that cannot filter tools', async () => {
     // Attaching it would hand over the exact tool the deny was meant to stop,
     // which is how this control silently did nothing on Cursor and OpenCode.
-    const servers = await resolve(gatedServer(), {
-      toolFiltering: 'none',
-      interactiveApproval: false,
-    });
+    const servers = await resolve(gatedServer(), { toolFiltering: 'none' });
 
     expect(servers).toEqual([]);
   });
@@ -206,10 +200,7 @@ describe('getMcpServersForSession - tool_permissions admission gate', () => {
 
   it('withholds a gated server from an include-list handler with no discovered tools', async () => {
     // An include-list has to enumerate what stays; nothing to enumerate here.
-    const servers = await resolve(gatedServer(), {
-      toolFiltering: 'include',
-      interactiveApproval: true,
-    });
+    const servers = await resolve(gatedServer(), { toolFiltering: 'include' });
 
     expect(servers).toEqual([]);
   });
@@ -221,16 +212,13 @@ describe('getMcpServersForSession - tool_permissions admission gate', () => {
       { name: 'read_file', description: '' },
     ];
 
-    const servers = await resolve(server, { toolFiltering: 'include', interactiveApproval: true });
+    const servers = await resolve(server, { toolFiltering: 'include' });
 
     expect(servers.map(({ server: s }) => s.mcp_server_id)).toEqual(['gated']);
   });
 
   it('leaves servers without tool_permissions untouched on every handler', async () => {
-    const servers = await resolve(makeServer('plain', 'global'), {
-      toolFiltering: 'none',
-      interactiveApproval: false,
-    });
+    const servers = await resolve(makeServer('plain', 'global'), { toolFiltering: 'none' });
 
     expect(servers.map(({ server }) => server.mcp_server_id)).toEqual(['plain']);
   });

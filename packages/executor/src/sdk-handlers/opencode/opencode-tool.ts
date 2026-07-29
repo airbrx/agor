@@ -264,7 +264,7 @@ export class OpenCodeTool implements ITool {
           },
           // OpenCode's mcp.add() takes no tool filter and Agor auto-approves
           // every permission for it, so gated servers are withheld instead.
-          { toolFiltering: 'none', interactiveApproval: false }
+          { toolFiltering: 'none' }
         );
 
         for (const { server } of servers) {
