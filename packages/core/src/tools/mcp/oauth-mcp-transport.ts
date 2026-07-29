@@ -115,6 +115,20 @@ function parseWWWAuthenticate(header: string): string | null {
 }
 
 /**
+ * Fetch used for discovery requests.
+ *
+ * Discovery walks URLs derived from — and named by — a server Agor does not
+ * control, so the trust model differs by caller. The interactive connect flow
+ * uses the default: the user picked the server, and following a redirect to
+ * reach its metadata is benign. The catalog auth probe, whose input is whatever
+ * an anonymous stranger published to a public registry, injects a fetch that
+ * refuses non-public hosts, refuses redirects, and caps the body — otherwise a
+ * `302` from a public well-known endpoint to `169.254.169.254` walks straight
+ * into the daemon's private network.
+ */
+export type DiscoveryFetch = (input: string, init?: { signal?: AbortSignal }) => Promise<Response>;
+
+/**
  * Discover the OAuth Protected Resource Metadata URL for an MCP server.
  *
  * Many MCP servers (e.g. Notion) return a 401 with a plain Bearer challenge
@@ -128,7 +142,10 @@ function parseWWWAuthenticate(header: string): string | null {
  * @param mcpUrl - The MCP server URL
  * @returns The resource metadata URL if discoverable, null otherwise
  */
-export async function discoverResourceMetadataUrl(mcpUrl: string): Promise<string | null> {
+export async function discoverResourceMetadataUrl(
+  mcpUrl: string,
+  fetchImpl: DiscoveryFetch = fetch
+): Promise<string | null> {
   const url = new URL(mcpUrl);
   const origin = url.origin;
   const path = url.pathname === '/' ? '' : url.pathname.replace(/\/$/, '');
@@ -144,7 +161,7 @@ export async function discoverResourceMetadataUrl(mcpUrl: string): Promise<strin
   for (const candidate of candidates) {
     try {
       console.log('[MCP OAuth] Trying resource metadata discovery:', candidate);
-      const response = await fetch(candidate, { signal: AbortSignal.timeout(10_000) });
+      const response = await fetchImpl(candidate, { signal: AbortSignal.timeout(10_000) });
       if (response.ok) {
         // Validate it looks like proper metadata
         const data = (await response.json()) as Record<string, unknown>;
@@ -179,7 +196,8 @@ export async function discoverResourceMetadataUrl(mcpUrl: string): Promise<strin
  */
 export async function resolveResourceMetadataUrl(
   wwwAuthenticateHeader: string | null,
-  mcpUrl: string
+  mcpUrl: string,
+  fetchImpl: DiscoveryFetch = fetch
 ): Promise<{ metadataUrl: string; source: 'header' | 'well-known' } | null> {
   // Strategy 1: Parse from WWW-Authenticate header
   if (wwwAuthenticateHeader) {
@@ -190,7 +208,7 @@ export async function resolveResourceMetadataUrl(
   }
 
   // Strategy 2: Auto-discover via .well-known endpoint
-  const discovered = await discoverResourceMetadataUrl(mcpUrl);
+  const discovered = await discoverResourceMetadataUrl(mcpUrl, fetchImpl);
   if (discovered) {
     return { metadataUrl: discovered, source: 'well-known' };
   }
@@ -224,7 +242,8 @@ export async function resolveResourceMetadataUrl(
  * @returns Discovered AS metadata + the URL it was fetched from, or null
  */
 export async function discoverAuthorizationServerFromMcpOrigin(
-  mcpUrl: string
+  mcpUrl: string,
+  fetchImpl: DiscoveryFetch = fetch
 ): Promise<{ metadata: AuthorizationServerMetadata; discoveredAt: string } | null> {
   const url = new URL(mcpUrl);
   const origin = url.origin;
@@ -248,7 +267,7 @@ export async function discoverAuthorizationServerFromMcpOrigin(
   for (const candidate of unique) {
     try {
       console.log('[MCP OAuth] Trying AS-direct discovery:', candidate);
-      const response = await fetch(candidate, { signal: AbortSignal.timeout(10_000) });
+      const response = await fetchImpl(candidate, { signal: AbortSignal.timeout(10_000) });
       if (!response.ok) continue;
       const data = (await response.json()) as Partial<AuthorizationServerMetadata>;
       // Minimal validation: must have authorization_endpoint + token_endpoint
@@ -316,16 +335,17 @@ export type MCPOAuthDiscoveryResult =
  */
 export async function resolveMCPOAuthDiscovery(
   wwwAuthenticateHeader: string | null,
-  mcpUrl: string
+  mcpUrl: string,
+  fetchImpl: DiscoveryFetch = fetch
 ): Promise<MCPOAuthDiscoveryResult | null> {
   // Strategies 1 + 2: RFC 9728 (header hint, then well-known fallback)
-  const rfc9728 = await resolveResourceMetadataUrl(wwwAuthenticateHeader, mcpUrl);
+  const rfc9728 = await resolveResourceMetadataUrl(wwwAuthenticateHeader, mcpUrl, fetchImpl);
   if (rfc9728) {
     return { kind: 'resource-metadata', ...rfc9728 };
   }
 
   // Strategies 3 + 4: AS metadata directly at MCP origin (RFC 8414 / OIDC)
-  const asDirect = await discoverAuthorizationServerFromMcpOrigin(mcpUrl);
+  const asDirect = await discoverAuthorizationServerFromMcpOrigin(mcpUrl, fetchImpl);
   if (asDirect) {
     return {
       kind: 'authorization-server',
