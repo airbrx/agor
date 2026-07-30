@@ -498,6 +498,13 @@
       "when": 1785200000000,
       "tag": "0072_drop_serialized_sessions",
       "breakpoints": true
+    },
+    {
+      "idx": 73,
+      "version": "6",
+      "when": 1786000000000,
+      "tag": "0073_kb_document_comments",
+      "breakpoints": true
     }
   ]
 }
