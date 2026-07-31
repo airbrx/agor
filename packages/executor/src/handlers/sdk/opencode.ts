@@ -22,6 +22,8 @@ import { createFeathersBackedRepositories } from '../../db/feathers-repositories
 import type { ResolvedConfigSlice } from '../../payload-types.js';
 import { OpenCodeTool } from '../../sdk-handlers/opencode/index.js';
 import type { AgorClient } from '../../services/feathers-client.js';
+import type { AgenticToolOutcome } from '../../terminal-task.js';
+import { isDaemonOwnedAbort } from '../../termination-state.js';
 import { createStreamingCallbacks } from './base-executor.js';
 
 /**
@@ -38,9 +40,10 @@ export async function executeOpenCodeTask(params: {
   abortController: AbortController;
   resolvedConfig?: ResolvedConfigSlice;
   onPulse?: (kind: ExecutorPulseKind, detail?: string) => void;
-}): Promise<void> {
+}): Promise<AgenticToolOutcome | undefined> {
   const { client, sessionId, taskId, prompt } = params;
-  let abortHandler: (() => void) | undefined;
+  let abortHandler: (() => Promise<void>) | undefined;
+  let abortCompletion: Promise<void> | undefined;
 
   console.log(`[opencode] Executing task ${shortId(taskId)}...`);
 
@@ -134,12 +137,16 @@ export async function executeOpenCodeTask(params: {
       session.mcp_token
     );
     abortHandler = () => {
-      void tool.stopTask(sessionId).then((result) => {
+      abortCompletion ??= tool.stopTask(sessionId).then((result) => {
         if (!result.success) console.warn(`[opencode] Abort was not confirmed: ${result.reason}`);
       });
+      return abortCompletion;
     };
     params.abortController.signal.addEventListener('abort', abortHandler, { once: true });
-    if (params.abortController.signal.aborted) abortHandler();
+    if (params.abortController.signal.aborted) {
+      await abortHandler();
+      return;
+    }
 
     // Get existing messages to determine next index
     const existingMessages = await client.service('messages').find({
@@ -180,28 +187,29 @@ export async function executeOpenCodeTask(params: {
 
     console.log('[opencode] Setting task model:', modelIdentifier);
 
-    // Update task status to completed and set model
-    if (!params.abortController.signal.aborted) {
-      await client.service('tasks').patch(taskId, {
-        status: result?.status === 'completed' ? 'completed' : 'failed',
-        completed_at: new Date().toISOString(),
-        model: modelIdentifier, // Set the model identifier used for this task (provider/model format)
-      });
-    }
+    if (isDaemonOwnedAbort(params.abortController)) return;
+    return {
+      status: params.abortController.signal.aborted
+        ? 'stopped'
+        : result?.status === 'completed'
+          ? 'completed'
+          : 'failed',
+      taskPatch: {
+        model: modelIdentifier, // provider/model format
+      },
+    };
   } catch (error) {
     const err = error as Error;
     console.error('[opencode] Execution failed:', err);
 
-    // Update task status to failed
-    if (!params.abortController.signal.aborted) {
-      await client.service('tasks').patch(taskId, {
-        status: 'failed',
-        completed_at: new Date().toISOString(),
-      });
-    }
-
-    throw err;
+    if (isDaemonOwnedAbort(params.abortController)) return;
+    return {
+      status: params.abortController.signal.aborted ? 'stopped' : 'failed',
+      taskPatch: params.abortController.signal.aborted ? undefined : { error_message: err.message },
+      ...(params.abortController.signal.aborted ? {} : { error: err }),
+    };
   } finally {
     if (abortHandler) params.abortController.signal.removeEventListener('abort', abortHandler);
+    await abortCompletion;
   }
 }

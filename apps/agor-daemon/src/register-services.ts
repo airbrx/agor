@@ -45,7 +45,7 @@ import type {
   UserID,
   UUID,
 } from '@agor/core/types';
-import { ROLES, TaskStatus } from '@agor/core/types';
+import { getSessionType, ROLES, TaskStatus } from '@agor/core/types';
 import type { UnixUserMode } from '@agor/core/unix';
 import type express from 'express';
 import type {
@@ -965,6 +965,7 @@ function createExecuteHandler(
         permissionMode: permissionModeForPayload as 'ask' | 'auto' | 'allow-all' | undefined,
         cwd,
         messageSource: data.messageSource,
+        interactionMode: getSessionType(session) === 'agent' ? 'interactive' : 'unattended',
       },
     };
 

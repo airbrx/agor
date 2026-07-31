@@ -376,6 +376,7 @@ export async function setupQuery(
       permissionLocks: deps.permissionLocks,
       mcpServerRepo: deps.mcpServerRepo,
       sessionMCPRepo: deps.sessionMCPRepo,
+      abortController: abortController ?? new AbortController(),
     });
     console.log(`✅ canUseTool callback added (permission mode: ${effectivePermissionMode})`);
   }

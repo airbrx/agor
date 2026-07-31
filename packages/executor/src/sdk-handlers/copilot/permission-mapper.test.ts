@@ -7,7 +7,9 @@ describe('createPermissionHandler', () => {
     const sessionId = 'test-session' as SessionID;
     const taskId = 'test-task' as TaskID;
     const tasksService = { patch: vi.fn().mockResolvedValue(undefined) };
+    const abortController = new AbortController();
     const handler = createPermissionHandler(sessionId, taskId, 'ask', {
+      abortController,
       permissionService: {
         emitRequest: vi.fn(),
         waitForDecision: vi.fn().mockResolvedValue({

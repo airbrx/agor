@@ -55,6 +55,7 @@ describe('PromptPayloadSchema', () => {
         prompt: 'Hello!',
         tool: 'gemini',
         permissionMode: 'auto',
+        interactionMode: 'unattended',
         cwd: '/home/user/project',
       },
     };
@@ -64,6 +65,7 @@ describe('PromptPayloadSchema', () => {
     expect(result.env?.ANTHROPIC_API_KEY).toBe('key');
     expect(result.dataHome).toBe('/data/agor');
     expect(result.params.permissionMode).toBe('auto');
+    expect(result.params.interactionMode).toBe('unattended');
   });
 
   it('should reject invalid tool type', () => {

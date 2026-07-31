@@ -8,6 +8,11 @@ vi.mock('@agor/core', () => ({
   shortId: vi.fn((id: string) => id),
 }));
 
+import {
+  getInteractionAbortOutcome,
+  isDaemonOwnedAbort,
+  markCoordinatorTerminationAbort,
+} from '../../../termination-state.js';
 import { createCanUseToolCallback } from './permission-hooks.js';
 
 /**
@@ -26,7 +31,9 @@ describe('createCanUseToolCallback', () => {
   };
 
   function createBaseDeps() {
+    const abortController = new AbortController();
     return {
+      abortController,
       permissionService: {
         emitRequest: vi.fn(),
         waitForDecision: vi.fn(),
@@ -179,14 +186,17 @@ describe('createCanUseToolCallback', () => {
       expect(result.behavior).toBe('deny');
       expect(result.message).toContain('Bash');
       expect(deps.permissionService.cancelPendingRequests).toHaveBeenCalledWith(sessionId);
-      // Session driven back to idle so the user can re-prompt.
-      expect(deps.sessionsService.patch).toHaveBeenCalledWith(
-        sessionId,
-        expect.objectContaining({ status: 'idle' })
+      expect(deps.abortController.signal.aborted).toBe(true);
+      expect(getInteractionAbortOutcome(deps.abortController)).toMatchObject({
+        status: 'failed',
+      });
+      expect(deps.tasksService.patch).not.toHaveBeenCalledWith(
+        taskId,
+        expect.objectContaining({ status: 'failed' })
       );
     });
 
-    it('marks task and session timed_out when the permission request times out', async () => {
+    it('aborts the runtime with a timed_out outcome when the permission request times out', async () => {
       const deps = createBaseDeps();
       deps.permissionService.waitForDecision.mockResolvedValue({
         allow: false,
@@ -200,13 +210,14 @@ describe('createCanUseToolCallback', () => {
 
       expect(result.behavior).toBe('deny');
       expect(result.message).toMatch(/timed out/i);
-      expect(deps.tasksService.patch).toHaveBeenCalledWith(
+      expect(deps.abortController.signal.aborted).toBe(true);
+      expect(getInteractionAbortOutcome(deps.abortController)).toMatchObject({
+        status: 'timed_out',
+        errorMessage: expect.stringMatching(/timed out/i),
+      });
+      expect(deps.tasksService.patch).not.toHaveBeenCalledWith(
         taskId,
         expect.objectContaining({ status: 'timed_out' })
-      );
-      expect(deps.sessionsService.patch).toHaveBeenCalledWith(
-        sessionId,
-        expect.objectContaining({ status: 'timed_out', ready_for_prompt: true })
       );
     });
 
@@ -226,6 +237,27 @@ describe('createCanUseToolCallback', () => {
       // this guarantee, every subsequent tool call on the same session would
       // wait forever for a never-resolving promise.
       expect(deps.permissionLocks.has(sessionId)).toBe(false);
+    });
+
+    it('does not replace daemon-owned termination with a permission failure', async () => {
+      const deps = createBaseDeps();
+      deps.permissionService.waitForDecision.mockResolvedValue({
+        allow: false,
+        timedOut: false,
+        remember: false,
+        decidedBy: 'system',
+        reason: 'Cancelled',
+      });
+      markCoordinatorTerminationAbort(deps.abortController);
+      deps.abortController.abort();
+
+      const callback = createCanUseToolCallback(sessionId, taskId, deps);
+      await expect(callback('Bash', { command: 'ls' }, noopOptions)).resolves.toMatchObject({
+        behavior: 'deny',
+      });
+
+      expect(isDaemonOwnedAbort(deps.abortController)).toBe(true);
+      expect(getInteractionAbortOutcome(deps.abortController)).toBeUndefined();
     });
   });
 });
