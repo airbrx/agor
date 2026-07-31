@@ -150,7 +150,7 @@ mapping-review point.
 | Supervisor                    | Runs in  | Observes                                             | Detects                                                                               | Default behavior on `main`                                  |
 | ----------------------------- | -------- | ---------------------------------------------------- | ------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
 | Executor heartbeat supervisor | Daemon   | Durable dispatch/connection and heartbeat timestamps | Local dispatches that never connect; connected wrappers whose heartbeat becomes stale | Requires local absence proof or requests remote containment |
-| SDK watchdog                  | Executor | Semantic pulses on a monotonic clock                 | No first progress; Claude post-progress stall; unknown activity                       | `enforce`: abort recognized stalls and hand off containment |
+| SDK watchdog                  | Executor | Semantic pulses on a monotonic clock                 | No first progress; Claude or Codex post-progress stall; unknown activity              | `enforce`: abort recognized stalls and hand off containment |
 
 ### Daemon heartbeat supervisor
 
@@ -187,15 +187,18 @@ mapping-review point.
   deadline failures request SDK abort and hand containment to the daemon.
 
 First-progress supervision covers all mapped executor SDKs, including Cursor.
-Claude also has a one-hour post-progress idle timeout by default. Identified
-operations default to a four-hour absolute ceiling. Disabling wrapper heartbeat
-keeps coalesced pulse telemetry but disables periodic heartbeat writes and the
-stale-wrapper backstop; the executor-local watchdog still makes and reports
-direct health decisions. New Tasks default to `enforce`; a legacy active Task
-without a persisted watchdog mode remains observe-only for compatibility. If a
-telemetry write is rejected, the executor refreshes durable Task state; when
-the daemon already considers the Task terminal, the executor aborts its runtime
-and does not attempt another terminal settlement.
+Claude and Codex also have a one-hour post-progress idle timeout by default;
+operators may disable either tool's check explicitly with `null`. Identified
+operations use that tool-specific idle timeout as their default quiet deadline
+and retain a four-hour absolute ceiling. With `null`, operation quiet supervision
+falls back to that absolute ceiling. Disabling wrapper heartbeat keeps coalesced
+pulse telemetry but disables periodic heartbeat writes and the stale-wrapper
+backstop; the executor-local watchdog still makes and reports direct health
+decisions. New Tasks default to `enforce`; a legacy active Task without a
+persisted watchdog mode remains observe-only for compatibility. If a telemetry
+write is rejected, the executor refreshes durable Task state; when the daemon
+already considers the Task terminal, the executor aborts its runtime and does
+not attempt another terminal settlement.
 
 ## Cooperative completion and interaction waits
 
