@@ -15,7 +15,6 @@ import { shortId } from '@agor/core/db';
 import { renderAgorSystemPrompt } from '@agor/core/templates/session-context';
 import { mergeMCPRemoteHeaders } from '@agor/core/tools/mcp/http-headers';
 import { resolveMCPAuthHeaders } from '@agor/core/tools/mcp/jwt-auth';
-import type { MCPServer } from '@agor/core/types';
 import type { CopilotSession } from '@github/copilot-sdk';
 import { CopilotClient } from '@github/copilot-sdk';
 import { getDaemonUrl } from '../../config.js';
@@ -36,10 +35,6 @@ import type { PermissionMode, SessionID, TaskID, UserID } from '../../types.js';
 import { resolveContextUserId } from '../base/context-user.js';
 import type { MessagesService, SessionsPatchClient, TasksService } from '../base/index.js';
 import { getMcpServersForSession } from '../base/mcp-scoping.js';
-import {
-  listMcpToolsWithPermission,
-  PERMISSIONS_BLOCKED_WITHOUT_PROMPT,
-} from '../base/mcp-tool-permissions.js';
 import type { CopilotSessionEvents } from './event-mapper.js';
 import { DEFAULT_COPILOT_MODEL } from './models.js';
 import { createPermissionHandler, type PermissionDeps } from './permission-mapper.js';
@@ -111,25 +106,6 @@ export interface CopilotRawResponse {
   sessionId?: string;
 }
 
-/**
- * Copilot's per-server `tools` is an include-list ("*" means all), so gating a
- * tool means naming everything else. The admission gate in `mcp-scoping` has
- * already withheld any server that sets permissions without a discovered tool
- * list, so enumeration is safe by the time we get here.
- */
-export function resolveCopilotServerTools(server: MCPServer): string[] {
-  const blocked = new Set(listMcpToolsWithPermission(server, PERMISSIONS_BLOCKED_WITHOUT_PROMPT));
-  if (blocked.size === 0) return ['*'];
-
-  const allowed = (server.tools ?? [])
-    .map((tool) => tool.name)
-    .filter((name) => !blocked.has(name));
-  console.warn(
-    `   ⛔ [Copilot MCP] Restricting "${server.name}" to ${allowed.length} tool(s) per tool_permissions`
-  );
-  return allowed;
-}
-
 export class CopilotPromptService {
   private client: InstanceType<typeof CopilotClient> | null = null;
   private stopRequested = new Map<SessionID, boolean>();
@@ -188,9 +164,10 @@ export class CopilotPromptService {
         mcpOAuthAuthHeadersRepo: this.mcpOAuthAuthHeadersRepo,
         forUserId,
       },
-      // Copilot's per-server `tools` is an include-list, so gating a tool means
-      // enumerating the survivors — which needs a discovered tool list.
-      { toolFiltering: 'include' }
+      // Copilot's per-server `tools` is an include-list, so naming what to drop
+      // would mean enumerating the survivors from `server.tools` — a cached
+      // snapshot no SDK reads. A gated server is withheld instead.
+      { toolFiltering: 'none' }
     );
 
     const mcpServers = serversWithSource.map((s) => s.server);
@@ -198,7 +175,6 @@ export class CopilotPromptService {
 
     for (const server of mcpServers) {
       const serverName = server.name.toLowerCase().replace(/[^a-z0-9_-]/g, '_');
-      const tools = resolveCopilotServerTools(server);
 
       if (server.transport === 'stdio') {
         copilotMcpServers[serverName] = {
@@ -206,14 +182,14 @@ export class CopilotPromptService {
           command: server.command,
           args: server.args,
           env: server.env,
-          tools,
+          tools: ['*'],
         };
         console.log(`   📝 [Copilot MCP] Configured STDIO server: ${server.name}`);
       } else if (server.transport === 'http' || server.transport === 'sse') {
         const serverConfig: Record<string, unknown> = {
           type: 'http',
           url: server.url,
-          tools,
+          tools: ['*'],
         };
 
         const authHeaders = await resolveMCPAuthHeaders(server.auth, server.url);

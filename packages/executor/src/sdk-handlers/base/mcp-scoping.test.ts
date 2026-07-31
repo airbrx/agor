@@ -198,23 +198,20 @@ describe('getMcpServersForSession - tool_permissions admission gate', () => {
     expect(servers.map(({ server }) => server.mcp_server_id)).toEqual(['gated']);
   });
 
-  it('withholds a gated server from an include-list handler with no discovered tools', async () => {
-    // An include-list has to enumerate what stays; nothing to enumerate here.
-    const servers = await resolve(gatedServer(), { toolFiltering: 'include' });
-
-    expect(servers).toEqual([]);
-  });
-
-  it('keeps a gated server for an include-list handler once tools are known', async () => {
+  // A cached `server.tools` snapshot is not evidence of anything: no SDK reads
+  // it, and nothing proves it is current. Enforcing from it would make a stale
+  // cache the authoritative tool set, so a discovered list does not make a
+  // gated server enforceable.
+  it('withholds a gated server from a filterless handler even when tools are known', async () => {
     const server = gatedServer();
     server.tools = [
       { name: 'write_file', description: '' },
       { name: 'read_file', description: '' },
     ];
 
-    const servers = await resolve(server, { toolFiltering: 'include' });
+    const servers = await resolve(server, { toolFiltering: 'none' });
 
-    expect(servers.map(({ server: s }) => s.mcp_server_id)).toEqual(['gated']);
+    expect(servers).toEqual([]);
   });
 
   it('leaves servers without tool_permissions untouched on every handler', async () => {

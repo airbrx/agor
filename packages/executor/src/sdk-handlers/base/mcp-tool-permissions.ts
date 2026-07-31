@@ -38,12 +38,17 @@ export const PERMISSIONS_BLOCKED_WITHOUT_PROMPT: readonly ToolPermission[] = ['d
  */
 export interface HandlerPermissionCapabilities {
   /**
-   * - `exclude`: can name tools to drop (Claude, Gemini, Codex)
-   * - `include`: can name the tools to keep, so it needs a discovered tool list
-   *   to express "all but these" (Copilot)
-   * - `none`: no per-tool control at all (Cursor, OpenCode)
+   * Whether the handler can name a tool to drop in the config it hands its SDK
+   * (`exclude`: Claude, Gemini, Codex) or has no per-tool control at all
+   * (`none`: Copilot, Cursor, OpenCode).
+   *
+   * Deliberately not "can express a tool set". An include-list can only say
+   * "all but these" by enumerating the survivors, and the only inventory
+   * available here is `server.tools` — a cached discovery snapshot that no SDK
+   * reads and that nothing proves is current. Enforcing from it would turn a
+   * stale cache into the authoritative tool set.
    */
-  toolFiltering: 'exclude' | 'include' | 'none';
+  toolFiltering: 'exclude' | 'none';
 }
 
 /**
@@ -62,10 +67,6 @@ export function canEnforceMcpToolPermissions(
   switch (caps.toolFiltering) {
     case 'exclude':
       return true;
-    // An include-list has to enumerate what stays, which is impossible before
-    // the server's tools have been discovered.
-    case 'include':
-      return (server.tools?.length ?? 0) > 0;
     case 'none':
       return false;
   }
