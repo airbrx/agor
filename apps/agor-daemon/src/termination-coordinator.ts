@@ -11,6 +11,7 @@ import type {
 import { isTerminalTaskStatus, TaskStatus } from '@agor/core/types';
 import type { TasksServiceImpl } from './declarations.js';
 import { containExecutorProcess, untrackExecutorProcess } from './executor-tracking.js';
+import type { TerminalQueueProcessingParams } from './utils/session-task-state.js';
 
 export interface TerminationResult {
   status: 'terminal' | 'unverified' | 'condition_changed';
@@ -23,7 +24,7 @@ export interface TerminationInput {
   taskId: TaskID | string;
   cause: TerminationCause;
   errorMessage: string;
-  params?: Params;
+  params?: TerminalQueueProcessingParams;
   signalDelayMs?: number;
   /** Test/configuration seam for the cooperative socket-stop grace window. */
   cooperativeGraceMs?: number;
@@ -166,7 +167,7 @@ async function runContainment(
         sdkFailure: diagnosis,
         errorMessage: unverifiedMessage(current.task_id, reason),
       },
-      { ...internalParams(input.params), suppressTerminalQueueProcessing: true } as Params
+      internalParams(input.params)
     );
     if (settlement.outcome === 'terminal') {
       return { status: 'unverified', task: settlement.task, reason };
@@ -183,7 +184,7 @@ async function runContainment(
       outcome: 'verified_absent',
       errorMessage: input.errorMessage,
     },
-    { ...internalParams(input.params), suppressTerminalQueueProcessing: true } as Params
+    internalParams(input.params)
   );
   if (settlement.outcome === 'condition_changed') {
     return { status: 'condition_changed', task: settlement.task };

@@ -3,7 +3,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const requestExecutorTermination = vi.hoisted(() =>
   vi.fn().mockResolvedValue({ status: 'terminal', task: {} })
 );
+const inspectTrackedExecutorProcess = vi.hoisted(() => vi.fn());
 vi.mock('../termination-coordinator.js', () => ({ requestExecutorTermination }));
+vi.mock('../executor-tracking.js', () => ({ inspectTrackedExecutorProcess }));
 
 import {
   EXECUTOR_HEARTBEAT_LOST_MESSAGE,
@@ -54,9 +56,12 @@ function supervisorFor(input: {
 }
 
 describe('ExecutorHeartbeatSupervisor', () => {
-  beforeEach(() => requestExecutorTermination.mockClear());
+  beforeEach(() => {
+    requestExecutorTermination.mockReset().mockResolvedValue({ status: 'terminal', task: {} });
+    inspectTrackedExecutorProcess.mockReset().mockReturnValue({ status: 'absent' });
+  });
 
-  it('marks active tasks failed when latest heartbeat is stale', async () => {
+  it('requests containment when a stale local executor is verified absent', async () => {
     const staleTask = {
       task_id: '018f0000-0000-7000-8000-000000000001',
       session_id: '018f0000-0000-7000-8000-000000000002',
@@ -75,6 +80,64 @@ describe('ExecutorHeartbeatSupervisor', () => {
         expectedStatus: staleTask.status,
         expectedHeartbeatAt: staleTask.last_executor_heartbeat_at,
         heartbeatStaleBefore: '2026-01-01T00:00:02.000Z',
+        absenceVerified: true,
+      })
+    );
+  });
+
+  it('does not terminate a stale local task while its executor is still present', async () => {
+    const staleTask = {
+      task_id: '018f0000-0000-7000-8000-000000000003',
+      session_id: '018f0000-0000-7000-8000-000000000004',
+      status: 'running',
+      executor_mode: 'local',
+      last_executor_heartbeat_at: '2026-01-01T00:00:00.000Z',
+    };
+    inspectTrackedExecutorProcess.mockReturnValue({ status: 'present' });
+    const { supervisor } = supervisorFor({ active: [staleTask] });
+
+    await supervisor.checkOnce();
+
+    expect(requestExecutorTermination).not.toHaveBeenCalled();
+  });
+
+  it('does not terminate a stale local task when process liveness is unverified', async () => {
+    const staleTask = {
+      task_id: '018f0000-0000-7000-8000-000000000005',
+      session_id: '018f0000-0000-7000-8000-000000000006',
+      status: 'running',
+      executor_mode: 'local',
+      last_executor_heartbeat_at: '2026-01-01T00:00:00.000Z',
+    };
+    inspectTrackedExecutorProcess.mockReturnValue({
+      status: 'unverified',
+      reason: 'Process identity is unreadable.',
+    });
+    const { supervisor } = supervisorFor({ active: [staleTask] });
+
+    await supervisor.checkOnce();
+
+    expect(requestExecutorTermination).not.toHaveBeenCalled();
+  });
+
+  it('uses the remote liveness contract for a stale templated executor', async () => {
+    const staleTask = {
+      task_id: '018f0000-0000-7000-8000-000000000007',
+      session_id: '018f0000-0000-7000-8000-000000000008',
+      status: 'running',
+      executor_mode: 'templated',
+      last_executor_heartbeat_at: '2026-01-01T00:00:00.000Z',
+    };
+    const { supervisor } = supervisorFor({ active: [staleTask] });
+
+    await supervisor.checkOnce();
+
+    expect(inspectTrackedExecutorProcess).not.toHaveBeenCalled();
+    expect(requestExecutorTermination).toHaveBeenCalledWith(
+      expect.objectContaining({
+        taskId: staleTask.task_id,
+        cause: 'heartbeat_lost',
+        absenceVerified: undefined,
       })
     );
   });

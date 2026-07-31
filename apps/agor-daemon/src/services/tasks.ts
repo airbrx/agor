@@ -92,7 +92,8 @@ export type TaskParams = QueryParams<{
 }> & {
   /**
    * Internal-only: terminal task patches normally drain queued work for the
-   * owning session. Heartbeat-loss handling must not auto-start queued prompts.
+   * owning session. Callers that already own the queue hand-off, or recovery
+   * paths that intentionally discard queued work, suppress it explicitly.
    */
   suppressTerminalQueueProcessing?: boolean;
   /**
@@ -422,22 +423,15 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
 
     this.trackTaskCompleted(result.task);
     const internalParams = { ...(params ?? {}), provider: undefined } as TaskParams;
-    const isStop = result.task.status === TaskStatus.STOPPED;
-    const completionParams = {
-      ...internalParams,
-      // Failure containment never drains queued work automatically. User Stop
-      // delegates that hand-off to its caller while the session lock is held;
-      // a late CLI confirmation has no caller and drains here instead.
-      suppressTerminalQueueProcessing: !isStop || params?.suppressTerminalQueueProcessing === true,
-    };
     const sessionProjected = await this.reconcileTerminalTask(
       result.task,
       result.task.status,
-      completionParams
+      internalParams
     );
     if (!sessionProjected) {
       try {
-        await this.projectTerminalSession(result.task, result.task.status, completionParams);
+        await this.projectTerminalSession(result.task, result.task.status, internalParams);
+        await this.continueQueuedTasksAfterTerminalSettlement(result.task, internalParams);
       } catch (error) {
         console.warn(
           `[termination] Failed to settle session ${shortId(result.task.session_id)}:`,
@@ -502,6 +496,19 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
 
     await this.runAfterTenantDatabaseCommit('triggerQueueProcessing', () =>
       sessionsService.triggerQueueProcessing(sessionId, sessionParams)
+    );
+  }
+
+  private async continueQueuedTasksAfterTerminalSettlement(
+    task: Task,
+    params?: TaskParams
+  ): Promise<void> {
+    if (!params?.suppressTerminalQueueProcessing) {
+      await this.triggerQueueProcessingAfterCommit(task.session_id, params);
+      return;
+    }
+    console.log(
+      `⏭️  [TasksService] Queue trigger suppressed for session ${shortId(task.session_id)} (suppressTerminalQueueProcessing)`
     );
   }
 
@@ -702,13 +709,7 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
         }
       });
 
-      if (!params?.suppressTerminalQueueProcessing) {
-        await this.triggerQueueProcessingAfterCommit(task.session_id, params);
-      } else {
-        console.log(
-          `⏭️  [TasksService] Queue trigger suppressed for session ${shortId(task.session_id)} (suppressTerminalQueueProcessing)`
-        );
-      }
+      await this.continueQueuedTasksAfterTerminalSettlement(task, params);
       return true;
     } catch (error) {
       console.error('❌ [TasksService] Failed to process task completion:', error);

@@ -152,7 +152,7 @@ describe('TasksService executor heartbeat helpers', () => {
         requested_at: '2026-01-01T00:00:04.000Z',
       },
     };
-    const { service, sessionsPatch } = completionHarness({
+    const { service, sessionsPatch, triggerQueueProcessing } = completionHarness({
       currentTask: failedTask,
       resultTask: failedTask,
       sessionReadFails: true,
@@ -163,8 +163,35 @@ describe('TasksService executor heartbeat helpers', () => {
     expect(sessionsPatch).toHaveBeenCalledWith(
       sessionId,
       { status: 'failed', ready_for_prompt: true },
-      expect.objectContaining({ provider: undefined, suppressTerminalQueueProcessing: true })
+      { provider: undefined }
     );
+    expect(triggerQueueProcessing).toHaveBeenCalledWith(sessionId, { provider: undefined });
+  });
+
+  it('continues distinct queued work after verified failure containment', async () => {
+    const taskId = '018f0000-0000-7000-8000-000000000012';
+    const sessionId = '018f0000-0000-7000-8000-000000000013';
+    const failedTask = {
+      task_id: taskId,
+      session_id: sessionId,
+      status: TaskStatus.FAILED,
+      created_at: '2026-01-01T00:00:00.000Z',
+      completed_at: '2026-01-01T00:00:05.000Z',
+      termination_request: {
+        cause: 'heartbeat_lost',
+        requested_at: '2026-01-01T00:00:04.000Z',
+      },
+    };
+    const queuedTaskId = '018f0000-0000-7000-8000-000000000014';
+    const { service, triggerQueueProcessing } = completionHarness({
+      currentTask: failedTask,
+      resultTask: failedTask,
+      sessionTasks: [taskId, queuedTaskId],
+    });
+
+    await service.settleTermination({ taskId, outcome: 'verified_absent' });
+
+    expect(triggerQueueProcessing).toHaveBeenCalledWith(sessionId, { provider: undefined });
   });
 
   it('settles a stopped active task ahead of queued work and triggers queue processing', async () => {

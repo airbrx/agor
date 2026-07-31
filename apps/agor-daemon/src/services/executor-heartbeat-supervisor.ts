@@ -2,6 +2,7 @@ import type { ResolvedExecutorHeartbeatConfig } from '@agor/core/config';
 import { shortId } from '@agor/core/db';
 import { TaskStatus } from '@agor/core/types';
 import type { Application, TasksServiceImpl } from '../declarations.js';
+import { inspectTrackedExecutorProcess } from '../executor-tracking.js';
 import { requestExecutorTermination } from '../termination-coordinator.js';
 
 export const EXECUTOR_HEARTBEAT_LOST_MESSAGE =
@@ -98,6 +99,19 @@ export class ExecutorHeartbeatSupervisor {
         if (nowMs - heartbeatMs <= this.options.config.stale_after_ms) continue;
 
         try {
+          const isRemote = task.executor_mode === 'templated';
+          if (!isRemote) {
+            const liveness = inspectTrackedExecutorProcess(task.session_id, task.task_id);
+            if (liveness.status !== 'absent') {
+              const detail =
+                liveness.status === 'present' ? 'present' : `unverified (${liveness.reason})`;
+              console.warn(
+                `[executor-heartbeat] Stale task ${shortId(task.task_id)} has no absence proof; local executor liveness is ${detail}. Rechecking later.`
+              );
+              continue;
+            }
+          }
+
           const session = await this.options.app.service('sessions').get(task.session_id);
           const result = await requestExecutorTermination({
             app: this.options.app,
@@ -109,6 +123,7 @@ export class ExecutorHeartbeatSupervisor {
             heartbeatStaleBefore: new Date(
               nowMs - this.options.config.stale_after_ms
             ).toISOString(),
+            absenceVerified: isRemote ? undefined : true,
             sdkFailure: {
               reason: 'heartbeat_lost',
               detected_at: this.now().toISOString(),

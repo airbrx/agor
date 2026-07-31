@@ -149,7 +149,7 @@ mapping-review point.
 
 | Supervisor                    | Runs in  | Observes                                             | Detects                                                                               | Default behavior on `main`                                  |
 | ----------------------------- | -------- | ---------------------------------------------------- | ------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
-| Executor heartbeat supervisor | Daemon   | Durable dispatch/connection and heartbeat timestamps | Local dispatches that never connect; connected wrappers whose heartbeat becomes stale | Requests daemon-owned containment                           |
+| Executor heartbeat supervisor | Daemon   | Durable dispatch/connection and heartbeat timestamps | Local dispatches that never connect; connected wrappers whose heartbeat becomes stale | Requires local absence proof or requests remote containment |
 | SDK watchdog                  | Executor | Semantic pulses on a monotonic clock                 | No first progress; Claude post-progress stall; unknown activity                       | `enforce`: abort recognized stalls and hand off containment |
 
 ### Daemon heartbeat supervisor
@@ -162,9 +162,13 @@ mapping-review point.
 - Connected active tasks heartbeat every 10 seconds by default.
 - The default stale threshold is at least 30 seconds and at least three
   heartbeat intervals.
-- A stale heartbeat requests containment using the expected status and
-  heartbeat timestamp as race fences. A newer heartbeat makes that claim lose
-  safely.
+- A stale local heartbeat is suspicion, not proof that the executor stopped.
+  The supervisor requests containment only after the tracked process group is
+  verified absent; a present or unverified process is left running and checked
+  again. Remote executors still enter their fenced containment contract because
+  the daemon cannot inspect their process group.
+- Containment requests use the expected status and heartbeat timestamp as race
+  fences. A newer heartbeat makes that claim lose safely.
 
 ### Executor SDK watchdog
 
@@ -199,11 +203,12 @@ Agentic-tool adapters return one normalized outcome containing the terminal
 status and non-lifecycle task data such as model, SDK response, context usage,
 error detail, and final git state. They do not patch terminal task state. The
 top-level executor accepts that outcome only after the adapter's SDK call and
-bounded cooperative cleanup have settled, then reports one semantic `quiesced`
-settlement to the daemon. The daemon commits terminal timing and result fields
-atomically. Process-level failure handlers never guess terminality; cleanup
-uncertainty reports `containment_required` and converges on the termination
-coordinator.
+bounded cooperative cleanup have settled. Outstanding transcript-stream side
+effects are drained within the same bound so a terminal outcome cannot overtake
+them. The executor then reports one semantic `quiesced` settlement to the
+daemon. The daemon commits terminal timing and result fields atomically.
+Process-level failure handlers never guess terminality; cleanup uncertainty
+reports `containment_required` and converges on the termination coordinator.
 
 The shared SDK adapter waits for its asynchronous provider stop hook before it
 returns. Cursor waits for the active run and closes the agent; OpenCode waits
@@ -261,7 +266,9 @@ admission/UI projection:
 - permission and Stop states are projected while their task owns the turn;
 - every terminal settlement invokes `TasksService.reconcileTerminalTask`, which
   projects the session, dispatches callbacks, finalizes the originating gateway,
-  and may trigger the oldest queued work;
+  and may trigger the oldest queued work. After verified failure containment,
+  that work is a distinct durable Task, not a retry or replay of the failed
+  prompt;
 - `reconcileSessionState` is the bounded startup/route repair entry point and
   derives the coarse projection from durable Task truth;
 - generic Session patch hooks do not independently drain the queue or finalize
@@ -301,7 +308,8 @@ Preserve these invariants:
 9. Daemon and executor releases are one runtime contract; mixed-version
    rollouts are unsupported.
 10. Supervision does not imply automatic retry, prompt replay, or exactly-once
-    external effects.
+    external effects. Verified settlement may continue a separately queued
+    Task; unverified containment may not.
 11. Agentic-tool adapters return normalized outcomes and do not write terminal
     task state.
 12. Permission timeout commits terminal state only after the outer

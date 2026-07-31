@@ -17,7 +17,17 @@ export type ContainmentResult =
   | { status: 'verified_absent' }
   | { status: 'unverified'; reason: string };
 
+export type ExecutorProcessLiveness =
+  | { status: 'present' }
+  | { status: 'absent' }
+  | { status: 'unverified'; reason: string };
+
 const executorProcesses = new Map<string, TrackedExecutor>();
+
+type TrackedExecutorInspection =
+  | { status: 'present'; tracked: TrackedExecutor }
+  | { status: 'absent'; tracked: TrackedExecutor }
+  | { status: 'unverified'; reason: string; tracked?: TrackedExecutor };
 
 function readStartIdentity(pid: number): string | undefined {
   try {
@@ -103,6 +113,54 @@ export function getTrackedExecutor(sessionId: string): Readonly<TrackedExecutor>
   return executorProcesses.get(sessionId);
 }
 
+function inspectTrackedExecutor(sessionId: string, taskId: string): TrackedExecutorInspection {
+  const tracked = executorProcesses.get(sessionId);
+  if (!tracked || tracked.taskId !== taskId) {
+    return { status: 'unverified', reason: 'No matching local executor is tracked.' };
+  }
+  if (process.platform !== 'linux' && process.platform !== 'darwin') {
+    return {
+      status: 'unverified',
+      tracked,
+      reason: `Process-group verification is unsupported on ${process.platform}.`,
+    };
+  }
+
+  const group = inspectGroup(tracked.pgid, 0, tracked.asUser);
+  if (group === 'absent') return { status: 'absent', tracked };
+  if (group === 'unverified') {
+    return {
+      status: 'unverified',
+      tracked,
+      reason: tracked.asUser
+        ? `Executor process-group presence could not be checked as ${tracked.asUser}.`
+        : 'Executor process-group presence is unverified.',
+    };
+  }
+  if (!tracked.leaderExited) {
+    const currentIdentity = readStartIdentity(tracked.pid);
+    if (!tracked.startIdentity || currentIdentity !== tracked.startIdentity) {
+      return {
+        status: 'unverified',
+        tracked,
+        reason: 'Executor process identity changed or is unreadable.',
+      };
+    }
+  }
+  return { status: 'present', tracked };
+}
+
+/** Read-only local process evidence for supervisors that must not signal live work. */
+export function inspectTrackedExecutorProcess(
+  sessionId: string,
+  taskId: string
+): ExecutorProcessLiveness {
+  const inspection = inspectTrackedExecutor(sessionId, taskId);
+  return inspection.status === 'unverified'
+    ? { status: inspection.status, reason: inspection.reason }
+    : { status: inspection.status };
+}
+
 export async function containExecutorProcess(
   sessionId: string,
   taskId: string,
@@ -114,35 +172,12 @@ export async function containExecutorProcess(
     pollMs?: number;
   } = {}
 ): Promise<ContainmentResult> {
-  const tracked = executorProcesses.get(sessionId);
-  if (!tracked || tracked.taskId !== taskId) {
-    return { status: 'unverified', reason: 'No matching local executor is tracked.' };
+  const inspection = inspectTrackedExecutor(sessionId, taskId);
+  if (inspection.status === 'absent') return { status: 'verified_absent' };
+  if (inspection.status === 'unverified') {
+    return { status: 'unverified', reason: inspection.reason };
   }
-  if (process.platform !== 'linux' && process.platform !== 'darwin') {
-    return {
-      status: 'unverified',
-      reason: `Process-group verification is unsupported on ${process.platform}.`,
-    };
-  }
-  const initial = inspectGroup(tracked.pgid, 0, tracked.asUser);
-  if (initial === 'absent') return { status: 'verified_absent' };
-  if (initial === 'unverified') {
-    return {
-      status: 'unverified',
-      reason: tracked.asUser
-        ? `Executor process-group presence could not be checked as ${tracked.asUser}.`
-        : 'Executor process-group presence is unverified.',
-    };
-  }
-  if (!tracked.leaderExited) {
-    const currentIdentity = readStartIdentity(tracked.pid);
-    if (!tracked.startIdentity || currentIdentity !== tracked.startIdentity) {
-      return {
-        status: 'unverified',
-        reason: 'Executor process identity changed or is unreadable.',
-      };
-    }
-  }
+  const tracked = inspection.tracked;
 
   if (
     options.preSignalGraceMs &&

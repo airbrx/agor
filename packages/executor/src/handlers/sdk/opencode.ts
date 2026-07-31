@@ -20,7 +20,11 @@ import type { SdkActivityCallback } from '../../sdk-watchdog.js';
 import type { AgorClient } from '../../services/feathers-client.js';
 import { type AgenticToolOutcome, awaitRuntimeCleanup } from '../../terminal-task.js';
 import { isDaemonOwnedAbort } from '../../termination-state.js';
-import { createStreamingCallbacks } from './base-executor.js';
+import {
+  createStreamingCallbacks,
+  type FlushableStreamingCallbacks,
+  flushStreamingCallbacks,
+} from './base-executor.js';
 
 /**
  * Execute OpenCode task (Feathers/WebSocket architecture)
@@ -40,6 +44,10 @@ export async function executeOpenCodeTask(params: {
   const { client, sessionId, taskId, prompt } = params;
   let abortHandler: (() => Promise<void>) | undefined;
   let abortCompletion: Promise<void> | undefined;
+  let callbacks: FlushableStreamingCallbacks | undefined;
+  const runtimeCleanupTimeoutMs = resolveSdkWatchdogConfig(
+    params.resolvedConfig?.execution
+  ).abort_grace_ms;
 
   console.log(`[opencode] Executing task ${shortId(taskId)}...`);
 
@@ -55,7 +63,7 @@ export async function executeOpenCodeTask(params: {
 
     // Create execution context (similar to other handlers)
     const repos = createFeathersBackedRepositories(client);
-    const callbacks = createStreamingCallbacks(client, 'opencode', sessionId, params.onActivity);
+    callbacks = createStreamingCallbacks(client, 'opencode', sessionId, params.onActivity);
 
     // OpenCode server URL: env var > daemon-resolved config slice > default.
     const serverUrl =
@@ -139,7 +147,7 @@ export async function executeOpenCodeTask(params: {
             throw new Error(result.reason ?? 'OpenCode stop was not confirmed');
           }
         }),
-        resolveSdkWatchdogConfig(params.resolvedConfig?.execution).abort_grace_ms,
+        runtimeCleanupTimeoutMs,
         'opencode'
       );
       void abortCompletion.catch(() => undefined);
@@ -218,5 +226,6 @@ export async function executeOpenCodeTask(params: {
   } finally {
     if (abortHandler) params.abortController.signal.removeEventListener('abort', abortHandler);
     await abortCompletion;
+    await flushStreamingCallbacks(callbacks, runtimeCleanupTimeoutMs, 'opencode');
   }
 }

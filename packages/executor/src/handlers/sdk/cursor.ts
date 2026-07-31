@@ -40,6 +40,8 @@ import { isDaemonOwnedAbort } from '../../termination-state.js';
 import {
   captureGitStateAtTaskEnd,
   createStreamingCallbacks,
+  type FlushableStreamingCallbacks,
+  flushStreamingCallbacks,
   stampGitStateAtTaskStart,
 } from './base-executor.js';
 import { configureSessionGitSafeDirectories } from './git-safe-directory.js';
@@ -495,14 +497,14 @@ export async function executeCursorTask(params: {
 
   let currentRun: Run | undefined;
   let abortCompletion: Promise<void> | undefined;
+  let callbacks: FlushableStreamingCallbacks | undefined;
+  const runtimeCleanupTimeoutMs = resolveSdkWatchdogConfig(
+    params.resolvedConfig?.execution
+  ).abort_grace_ms;
   const abortHandler = () => {
     if (!currentRun) return;
     console.log(`[cursor] Abort signal received; cancelling Cursor run ${currentRun.id}`);
-    abortCompletion ??= awaitRuntimeCleanup(
-      currentRun.cancel(),
-      resolveSdkWatchdogConfig(params.resolvedConfig?.execution).abort_grace_ms,
-      'cursor'
-    );
+    abortCompletion ??= awaitRuntimeCleanup(currentRun.cancel(), runtimeCleanupTimeoutMs, 'cursor');
     void abortCompletion.catch(() => undefined);
   };
   params.abortController.signal.addEventListener('abort', abortHandler);
@@ -514,7 +516,7 @@ export async function executeCursorTask(params: {
     const apiKey = await resolveCursorApiKey(client, taskId);
     const session = await client.service('sessions').get(sessionId);
     const repos = createFeathersBackedRepositories(client);
-    const callbacks = createStreamingCallbacks(client, 'cursor', sessionId, params.onActivity);
+    callbacks = createStreamingCallbacks(client, 'cursor', sessionId, params.onActivity);
 
     if (!session.branch_id) {
       throw new Error('Cursor sessions require a branch_id so the local runtime has a cwd.');
@@ -703,6 +705,7 @@ export async function executeCursorTask(params: {
   } finally {
     params.abortController.signal.removeEventListener('abort', abortHandler);
     await abortCompletion;
+    await flushStreamingCallbacks(callbacks, runtimeCleanupTimeoutMs, 'cursor');
   }
 }
 
