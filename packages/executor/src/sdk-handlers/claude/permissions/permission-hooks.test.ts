@@ -1,4 +1,5 @@
 import type { SessionID, TaskID } from '@agor/core/types';
+import { TaskStatus } from '@agor/core/types';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('@agor/core', () => ({
@@ -12,6 +13,7 @@ import {
   getInteractionAbortOutcome,
   isDaemonOwnedAbort,
   markCoordinatorTerminationAbort,
+  markInteractionAbort,
 } from '../../../termination-state.js';
 import { createCanUseToolCallback } from './permission-hooks.js';
 
@@ -105,8 +107,7 @@ describe('createCanUseToolCallback', () => {
       const deps = createBaseDeps();
       deps.sessionMCPRepo.listServers.mockResolvedValue([]); // no attached servers
       deps.permissionService.waitForDecision.mockResolvedValue({
-        allow: false,
-        timedOut: false,
+        outcome: 'denied',
         remember: false,
         decidedBy: 'test-user',
       });
@@ -124,8 +125,7 @@ describe('createCanUseToolCallback', () => {
     it('approves a tool when the UI returns allow', async () => {
       const deps = createBaseDeps();
       deps.permissionService.waitForDecision.mockResolvedValue({
-        allow: true,
-        timedOut: false,
+        outcome: 'approved',
         remember: false,
         decidedBy: 'test-user',
       });
@@ -150,8 +150,7 @@ describe('createCanUseToolCallback', () => {
     it('emits an SDK persistence rule when the user picks "remember"', async () => {
       const deps = createBaseDeps();
       deps.permissionService.waitForDecision.mockResolvedValue({
-        allow: true,
-        timedOut: false,
+        outcome: 'approved',
         remember: true,
         scope: 'project',
         decidedBy: 'test-user',
@@ -174,8 +173,7 @@ describe('createCanUseToolCallback', () => {
     it('denies the tool and cancels pending requests when the UI returns deny', async () => {
       const deps = createBaseDeps();
       deps.permissionService.waitForDecision.mockResolvedValue({
-        allow: false,
-        timedOut: false,
+        outcome: 'denied',
         remember: false,
         decidedBy: 'test-user',
       });
@@ -199,8 +197,7 @@ describe('createCanUseToolCallback', () => {
     it('aborts the runtime with a timed_out outcome when the permission request times out', async () => {
       const deps = createBaseDeps();
       deps.permissionService.waitForDecision.mockResolvedValue({
-        allow: false,
-        timedOut: true,
+        outcome: 'timed_out',
         remember: false,
         decidedBy: 'system',
       });
@@ -224,8 +221,7 @@ describe('createCanUseToolCallback', () => {
     it('always releases the per-session permission lock, even on timeout', async () => {
       const deps = createBaseDeps();
       deps.permissionService.waitForDecision.mockResolvedValue({
-        allow: false,
-        timedOut: true,
+        outcome: 'timed_out',
         remember: false,
         decidedBy: 'system',
       });
@@ -242,8 +238,7 @@ describe('createCanUseToolCallback', () => {
     it('does not replace daemon-owned termination with a permission failure', async () => {
       const deps = createBaseDeps();
       deps.permissionService.waitForDecision.mockResolvedValue({
-        allow: false,
-        timedOut: false,
+        outcome: 'cancelled',
         remember: false,
         decidedBy: 'system',
         reason: 'Cancelled',
@@ -256,6 +251,10 @@ describe('createCanUseToolCallback', () => {
         behavior: 'deny',
       });
 
+      markInteractionAbort(deps.abortController, {
+        status: TaskStatus.FAILED,
+        errorMessage: 'must not replace daemon ownership',
+      });
       expect(isDaemonOwnedAbort(deps.abortController)).toBe(true);
       expect(getInteractionAbortOutcome(deps.abortController)).toBeUndefined();
     });

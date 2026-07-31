@@ -17,7 +17,7 @@ import type {
   SessionID,
   TaskID,
 } from '@agor/core/types';
-import { MessageRole } from '@agor/core/types';
+import { MessageRole, TaskStatus } from '@agor/core/types';
 import { createFeathersBackedRepositories } from '../../db/feathers-repositories.js';
 import type { ResolvedConfigSlice } from '../../payload-types.js';
 import { OpenCodeTool } from '../../sdk-handlers/opencode/index.js';
@@ -190,10 +190,10 @@ export async function executeOpenCodeTask(params: {
     if (isDaemonOwnedAbort(params.abortController)) return;
     return {
       status: params.abortController.signal.aborted
-        ? 'stopped'
+        ? TaskStatus.STOPPED
         : result?.status === 'completed'
-          ? 'completed'
-          : 'failed',
+          ? TaskStatus.COMPLETED
+          : TaskStatus.FAILED,
       taskPatch: {
         model: modelIdentifier, // provider/model format
       },
@@ -204,7 +204,7 @@ export async function executeOpenCodeTask(params: {
 
     if (isDaemonOwnedAbort(params.abortController)) return;
     return {
-      status: params.abortController.signal.aborted ? 'stopped' : 'failed',
+      status: params.abortController.signal.aborted ? TaskStatus.STOPPED : TaskStatus.FAILED,
       taskPatch: params.abortController.signal.aborted ? undefined : { error_message: err.message },
       ...(params.abortController.signal.aborted ? {} : { error: err }),
     };

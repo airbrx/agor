@@ -1,6 +1,6 @@
 import type { ResolvedSdkWatchdogConfig } from '@agor/core/config';
 import type { ExecutorPulseKind, SdkHealthFailureInput } from '@agor/core/types';
-import { hasAgorAbortCause, markAgorAbortCause } from './termination-state.js';
+import { isSdkHealthFailureAbort, markSdkHealthFailureAbort } from './termination-state.js';
 
 export type SdkActivityAdapter = 'claude-code' | 'codex' | 'gemini' | 'copilot' | 'opencode';
 export type SdkActivityCallback = (kind: ExecutorPulseKind, detail?: string) => void;
@@ -92,12 +92,12 @@ export function reportSdkActivity(
 
 type WatchdogEvidence = Omit<SdkHealthFailureInput, 'task_id'>;
 export function markSdkHealthAbort(controller: AbortController): void {
-  markAgorAbortCause(controller, 'sdk_health_failure');
+  markSdkHealthFailureAbort(controller);
   controller.abort();
 }
 
 export function isSdkHealthAbort(controller: AbortController): boolean {
-  return hasAgorAbortCause(controller, 'sdk_health_failure');
+  return isSdkHealthFailureAbort(controller);
 }
 
 interface WatchdogState {

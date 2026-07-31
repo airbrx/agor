@@ -30,7 +30,10 @@ import type {
   SessionMCPServerRepository,
   SessionRepository,
 } from '../../db/feathers-repositories.js';
-import type { PermissionService } from '../../permissions/permission-service.js';
+import {
+  getPermissionStatus,
+  type PermissionService,
+} from '../../permissions/permission-service.js';
 import { isDaemonOwnedAbort, markInteractionAbort } from '../../termination-state.js';
 import type { PermissionMode } from '../../types.js';
 import type { MessagesService, SessionsPatchClient, TasksService } from '../base/index.js';
@@ -286,19 +289,14 @@ export function createPermissionHandler(
       });
 
       // Wait for UI decision (Promise pauses SDK execution)
-      const decision = await deps.permissionService.waitForDecision(
+      const resolution = await deps.permissionService.waitForDecision(
         requestId,
         taskId,
         sessionId,
         deps.abortController.signal
       );
 
-      // Determine the resulting permission status
-      const permissionStatus = decision.timedOut
-        ? PermissionStatus.TIMED_OUT
-        : decision.allow
-          ? PermissionStatus.APPROVED
-          : PermissionStatus.DENIED;
+      const permissionStatus = getPermissionStatus(resolution);
 
       // Update permission request message with outcome
       if (deps.messagesService) {
@@ -311,8 +309,8 @@ export function createPermissionHandler(
           content: {
             ...(baseContent as Record<string, unknown>),
             status: permissionStatus,
-            scope: decision.remember ? decision.scope : undefined,
-            approved_by: decision.decidedBy,
+            scope: resolution.remember ? resolution.scope : undefined,
+            approved_by: resolution.decidedBy,
             approved_at: new Date().toISOString(),
           },
         } as Partial<Message>);
@@ -321,13 +319,16 @@ export function createPermissionHandler(
       if (isDaemonOwnedAbort(deps.abortController)) {
         return {
           kind: 'denied-interactively-by-user',
-          feedback: decision.reason ?? 'Task termination requested',
+          feedback: resolution.reason ?? 'Task termination requested',
         };
       }
 
-      if (decision.unavailable) {
-        const message = decision.reason ?? `Permission cannot be requested for: ${toolName}`;
-        markInteractionAbort(deps.abortController, 'interaction_unavailable', message);
+      if (resolution.outcome === 'unavailable') {
+        const message = resolution.reason ?? `Permission cannot be requested for: ${toolName}`;
+        markInteractionAbort(deps.abortController, {
+          status: TaskStatus.FAILED,
+          errorMessage: message,
+        });
         return {
           kind: 'denied-interactively-by-user',
           feedback: message,
@@ -336,10 +337,13 @@ export function createPermissionHandler(
 
       // Abort the Copilot runtime first. The executor finalizer persists the
       // timeout only after the SDK and host cleanup have settled.
-      if (decision.timedOut) {
+      if (resolution.outcome === 'timed_out') {
         const message = `Permission request timed out for: ${toolName}`;
         console.log(`⏰ [Copilot Permission] ${message}`);
-        markInteractionAbort(deps.abortController, 'interaction_timeout', message);
+        markInteractionAbort(deps.abortController, {
+          status: TaskStatus.TIMED_OUT,
+          errorMessage: message,
+        });
 
         return {
           kind: 'denied-interactively-by-user',
@@ -348,7 +352,7 @@ export function createPermissionHandler(
       }
 
       // Handle denial
-      if (!decision.allow) {
+      if (resolution.outcome !== 'approved') {
         console.log(
           `🛑 [Copilot Permission] Permission denied for ${toolName}, stopping execution...`
         );
@@ -356,8 +360,11 @@ export function createPermissionHandler(
         // Cancel all pending permission requests for this session
         deps.permissionService.cancelPendingRequests(sessionId);
 
-        const message = decision.reason || `Permission denied for: ${toolName}`;
-        markInteractionAbort(deps.abortController, 'interaction_denied', message);
+        const message = resolution.reason || `Permission denied for: ${toolName}`;
+        markInteractionAbort(deps.abortController, {
+          status: TaskStatus.FAILED,
+          errorMessage: message,
+        });
 
         return {
           kind: 'denied-interactively-by-user',
@@ -383,7 +390,10 @@ export function createPermissionHandler(
 
       const errorMessage = error instanceof Error ? error.message : String(error);
       if (!isDaemonOwnedAbort(deps.abortController)) {
-        markInteractionAbort(deps.abortController, 'interaction_error', errorMessage);
+        markInteractionAbort(deps.abortController, {
+          status: TaskStatus.FAILED,
+          errorMessage,
+        });
       }
 
       return {

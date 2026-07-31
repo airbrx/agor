@@ -14,7 +14,10 @@ import type {
   MessagesRepository,
   SessionMCPServerRepository,
 } from '../../../db/feathers-repositories.js';
-import type { PermissionService } from '../../../permissions/permission-service.js';
+import {
+  getPermissionStatus,
+  type PermissionService,
+} from '../../../permissions/permission-service.js';
 import { isDaemonOwnedAbort, markInteractionAbort } from '../../../termination-state.js';
 import type { MessagesService, SessionsPatchClient, TasksService } from '../../base/index.js';
 
@@ -207,19 +210,14 @@ export function createCanUseToolCallback(
       });
 
       // Wait for UI decision (Promise pauses SDK execution)
-      const decision = await deps.permissionService.waitForDecision(
+      const resolution = await deps.permissionService.waitForDecision(
         requestId,
         taskId,
         sessionId,
         options.signal
       );
 
-      // Determine the resulting permission status
-      const permissionStatus = decision.timedOut
-        ? PermissionStatus.TIMED_OUT
-        : decision.allow
-          ? PermissionStatus.APPROVED
-          : PermissionStatus.DENIED;
+      const permissionStatus = getPermissionStatus(resolution);
 
       // Update permission request message with outcome
       if (deps.messagesService) {
@@ -232,8 +230,8 @@ export function createCanUseToolCallback(
           content: {
             ...(baseContent as Record<string, unknown>),
             status: permissionStatus,
-            scope: decision.remember ? decision.scope : undefined,
-            approved_by: decision.decidedBy,
+            scope: resolution.remember ? resolution.scope : undefined,
+            approved_by: resolution.decidedBy,
             approved_at: new Date().toISOString(),
           },
         } as Partial<Message>);
@@ -243,13 +241,16 @@ export function createCanUseToolCallback(
       if (isDaemonOwnedAbort(deps.abortController)) {
         return {
           behavior: 'deny' as const,
-          message: decision.reason ?? 'Task termination requested',
+          message: resolution.reason ?? 'Task termination requested',
         };
       }
 
-      if (decision.unavailable) {
-        const message = decision.reason ?? `Permission cannot be requested for tool: ${toolName}`;
-        markInteractionAbort(deps.abortController, 'interaction_unavailable', message);
+      if (resolution.outcome === 'unavailable') {
+        const message = resolution.reason ?? `Permission cannot be requested for tool: ${toolName}`;
+        markInteractionAbort(deps.abortController, {
+          status: TaskStatus.FAILED,
+          errorMessage: message,
+        });
         return {
           behavior: 'deny' as const,
           message,
@@ -258,10 +259,13 @@ export function createCanUseToolCallback(
 
       // Abort the agentic-tool runtime first. The executor finalizer persists
       // timed_out only after the query and its cleanup have settled.
-      if (decision.timedOut) {
+      if (resolution.outcome === 'timed_out') {
         const message = `Permission request timed out for tool: ${toolName}. Send a new prompt to retry.`;
         console.log(`⏰ [canUseTool] ${message}`);
-        markInteractionAbort(deps.abortController, 'interaction_timeout', message);
+        markInteractionAbort(deps.abortController, {
+          status: TaskStatus.TIMED_OUT,
+          errorMessage: message,
+        });
 
         return {
           behavior: 'deny' as const,
@@ -270,14 +274,17 @@ export function createCanUseToolCallback(
       }
 
       // If permission was denied, stop execution
-      if (!decision.allow) {
+      if (resolution.outcome !== 'approved') {
         console.log(`🛑 [canUseTool] Permission denied for ${toolName}, stopping execution...`);
 
         // Cancel all pending permission requests for this session
         deps.permissionService.cancelPendingRequests(sessionId);
 
-        const message = decision.reason || `Permission denied for tool: ${toolName}`;
-        markInteractionAbort(deps.abortController, 'interaction_denied', message);
+        const message = resolution.reason || `Permission denied for tool: ${toolName}`;
+        markInteractionAbort(deps.abortController, {
+          status: TaskStatus.FAILED,
+          errorMessage: message,
+        });
 
         return {
           behavior: 'deny' as const,
@@ -313,11 +320,11 @@ export function createCanUseToolCallback(
       };
 
       // Add updatedPermissions based on user's scope choice
-      if (decision.remember && decision.scope) {
+      if (resolution.remember && resolution.scope) {
         // Map Agor's scopes to SDK destinations
         let destination: 'projectSettings' | 'userSettings' | 'localSettings';
 
-        switch (decision.scope) {
+        switch (resolution.scope) {
           case PermissionScope.PROJECT:
             destination = 'projectSettings';
             break;
@@ -348,7 +355,10 @@ export function createCanUseToolCallback(
 
       const errorMessage = error instanceof Error ? error.message : String(error);
       if (!isDaemonOwnedAbort(deps.abortController)) {
-        markInteractionAbort(deps.abortController, 'interaction_error', errorMessage);
+        markInteractionAbort(deps.abortController, {
+          status: TaskStatus.FAILED,
+          errorMessage,
+        });
       }
 
       return {
