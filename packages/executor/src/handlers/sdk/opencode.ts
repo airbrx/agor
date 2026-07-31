@@ -10,19 +10,15 @@
  */
 
 import { generateId, shortId } from '@agor/core';
-import type {
-  ExecutorPulseKind,
-  MessageID,
-  PermissionMode,
-  SessionID,
-  TaskID,
-} from '@agor/core/types';
+import { resolveSdkWatchdogConfig } from '@agor/core/config';
+import type { MessageID, PermissionMode, SessionID, TaskID } from '@agor/core/types';
 import { MessageRole, TaskStatus } from '@agor/core/types';
 import { createFeathersBackedRepositories } from '../../db/feathers-repositories.js';
 import type { ResolvedConfigSlice } from '../../payload-types.js';
 import { OpenCodeTool } from '../../sdk-handlers/opencode/index.js';
+import type { SdkActivityCallback } from '../../sdk-watchdog.js';
 import type { AgorClient } from '../../services/feathers-client.js';
-import type { AgenticToolOutcome } from '../../terminal-task.js';
+import { type AgenticToolOutcome, awaitRuntimeCleanup } from '../../terminal-task.js';
 import { isDaemonOwnedAbort } from '../../termination-state.js';
 import { createStreamingCallbacks } from './base-executor.js';
 
@@ -39,7 +35,7 @@ export async function executeOpenCodeTask(params: {
   permissionMode?: PermissionMode;
   abortController: AbortController;
   resolvedConfig?: ResolvedConfigSlice;
-  onPulse?: (kind: ExecutorPulseKind, detail?: string) => void;
+  onActivity?: SdkActivityCallback;
 }): Promise<AgenticToolOutcome | undefined> {
   const { client, sessionId, taskId, prompt } = params;
   let abortHandler: (() => Promise<void>) | undefined;
@@ -59,7 +55,7 @@ export async function executeOpenCodeTask(params: {
 
     // Create execution context (similar to other handlers)
     const repos = createFeathersBackedRepositories(client);
-    const callbacks = createStreamingCallbacks(client, 'opencode', sessionId, params.onPulse);
+    const callbacks = createStreamingCallbacks(client, 'opencode', sessionId, params.onActivity);
 
     // OpenCode server URL: env var > daemon-resolved config slice > default.
     const serverUrl =
@@ -137,9 +133,16 @@ export async function executeOpenCodeTask(params: {
       session.mcp_token
     );
     abortHandler = () => {
-      abortCompletion ??= tool.stopTask(sessionId).then((result) => {
-        if (!result.success) console.warn(`[opencode] Abort was not confirmed: ${result.reason}`);
-      });
+      abortCompletion ??= awaitRuntimeCleanup(
+        tool.stopTask(sessionId).then((result) => {
+          if (!result.success) {
+            throw new Error(result.reason ?? 'OpenCode stop was not confirmed');
+          }
+        }),
+        resolveSdkWatchdogConfig(params.resolvedConfig?.execution).abort_grace_ms,
+        'opencode'
+      );
+      void abortCompletion.catch(() => undefined);
       return abortCompletion;
     };
     params.abortController.signal.addEventListener('abort', abortHandler, { once: true });
@@ -190,7 +193,7 @@ export async function executeOpenCodeTask(params: {
     if (isDaemonOwnedAbort(params.abortController)) return;
     return {
       status: params.abortController.signal.aborted
-        ? TaskStatus.STOPPED
+        ? TaskStatus.FAILED
         : result?.status === 'completed'
           ? TaskStatus.COMPLETED
           : TaskStatus.FAILED,
@@ -204,8 +207,12 @@ export async function executeOpenCodeTask(params: {
 
     if (isDaemonOwnedAbort(params.abortController)) return;
     return {
-      status: params.abortController.signal.aborted ? TaskStatus.STOPPED : TaskStatus.FAILED,
-      taskPatch: params.abortController.signal.aborted ? undefined : { error_message: err.message },
+      status: TaskStatus.FAILED,
+      taskPatch: {
+        error_message: params.abortController.signal.aborted
+          ? 'OpenCode runtime stopped without a daemon termination request.'
+          : err.message,
+      },
       ...(params.abortController.signal.aborted ? {} : { error: err }),
     };
   } finally {

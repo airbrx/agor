@@ -22,15 +22,12 @@ import { type HookContext, TaskStatus } from '@agor/core/types';
 import { describe, expect, it } from 'vitest';
 import {
   enrichSessionFindResultWithRemoteRelationships,
-  getTrustedSessionTenantId,
   isPromptFlowPatchOnly,
   PROMPT_FLOW_PATCH_FIELDS,
   protectExternalTaskCreate,
   protectServerManagedTaskWrites,
   type RegisterHooksContext,
   registerHooks,
-  shouldDrainQueueAfterSessionPostTurnPatch,
-  shouldRunSessionPostTurnHooks,
   shouldValidateRepoEnvironmentPayload,
   TENANT_IDENTITY_ONLY_SERVICE_PATHS,
   TENANT_OWNED_SERVICE_PATHS,
@@ -163,14 +160,12 @@ describe('protectServerManagedTaskWrites', () => {
     ).rejects.toThrow('not executor-managed');
   });
 
-  it('allows a task-scoped executor to publish bounded result fields', async () => {
+  it('allows a task-scoped executor to publish bounded nonterminal result fields', async () => {
     await expect(
       protectServerManagedTaskWrites(
         externalContext(
           'patch',
           {
-            status: TaskStatus.COMPLETED,
-            completed_at: '2026-07-10T20:00:00.000Z',
             model: 'test-model',
             git_state: { sha_at_end: 'abc' },
           },
@@ -181,6 +176,18 @@ describe('protectServerManagedTaskWrites', () => {
         )
       )
     ).resolves.toBeDefined();
+  });
+
+  it('requires the semantic settlement method for executor terminal outcomes', async () => {
+    await expect(
+      protectServerManagedTaskWrites(
+        externalContext(
+          'patch',
+          { status: TaskStatus.COMPLETED },
+          { taskId: 'task-1', executorTaskId: 'task-1' }
+        )
+      )
+    ).rejects.toThrow('reportExecutorSettlement');
   });
 
   it.each([
@@ -348,70 +355,6 @@ describe('shouldValidateRepoEnvironmentPayload', () => {
   it('validates present repo environment payloads', () => {
     expect(shouldValidateRepoEnvironmentPayload({})).toBe(true);
     expect(shouldValidateRepoEnvironmentPayload('invalid shape')).toBe(true);
-  });
-});
-
-describe('shouldRunSessionPostTurnHooks', () => {
-  it('runs for idle sessions, preserving stop-route gateway finalization behavior', () => {
-    expect(shouldRunSessionPostTurnHooks({ status: 'idle', ready_for_prompt: false })).toBe(true);
-  });
-
-  it('runs for failed sessions only once they are promptable', () => {
-    expect(shouldRunSessionPostTurnHooks({ status: 'failed', ready_for_prompt: true })).toBe(true);
-    expect(shouldRunSessionPostTurnHooks({ status: 'failed', ready_for_prompt: false })).toBe(
-      false
-    );
-  });
-
-  it('does not run for busy sessions', () => {
-    expect(shouldRunSessionPostTurnHooks({ status: 'running', ready_for_prompt: false })).toBe(
-      false
-    );
-  });
-});
-
-describe('getTrustedSessionTenantId', () => {
-  it('reads non-enumerable tenant metadata from session DTOs without requiring JSON exposure', () => {
-    const session = makeSession('session-1');
-    Object.defineProperty(session, 'tenant_id', {
-      value: 'tenant-from-row',
-      enumerable: false,
-    });
-
-    expect(getTrustedSessionTenantId(session)).toBe('tenant-from-row');
-    expect(Object.keys(session)).not.toContain('tenant_id');
-    expect(JSON.stringify(session)).not.toContain('tenant_id');
-  });
-
-  it('ignores absent or empty tenant metadata', () => {
-    expect(getTrustedSessionTenantId(makeSession('session-1'))).toBeUndefined();
-    expect(getTrustedSessionTenantId({ tenant_id: '' })).toBeUndefined();
-  });
-});
-
-describe('shouldDrainQueueAfterSessionPostTurnPatch', () => {
-  it('drains for promptable ready sessions by default', () => {
-    expect(
-      shouldDrainQueueAfterSessionPostTurnPatch({ status: 'failed', ready_for_prompt: true })
-    ).toBe(true);
-    expect(
-      shouldDrainQueueAfterSessionPostTurnPatch({ status: 'idle', ready_for_prompt: true })
-    ).toBe(true);
-  });
-
-  it('does not drain when terminal queue processing is explicitly suppressed', () => {
-    expect(
-      shouldDrainQueueAfterSessionPostTurnPatch(
-        { status: 'failed', ready_for_prompt: true },
-        { suppressTerminalQueueProcessing: true }
-      )
-    ).toBe(false);
-  });
-
-  it('does not drain for promptable-but-not-ready acknowledgement states', () => {
-    expect(
-      shouldDrainQueueAfterSessionPostTurnPatch({ status: 'idle', ready_for_prompt: false })
-    ).toBe(false);
   });
 });
 

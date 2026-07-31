@@ -49,6 +49,7 @@ function makeStartupContextWithGuardedDb(fixtures: StartupFixtures = {}) {
     }),
     patch: vi.fn(),
     settleTermination: vi.fn(),
+    reconcileSessionState: vi.fn(),
   };
   const sessionsService = {
     find: vi.fn(
@@ -77,6 +78,10 @@ function makeStartupContextWithGuardedDb(fixtures: StartupFixtures = {}) {
     }),
     patch: vi.fn(),
   };
+  tasksService.reconcileSessionState.mockImplementation(async (id: string, params: unknown) => {
+    await sessionsService.patch(id, { ready_for_prompt: true }, params);
+    return fixtures.sessionsById?.[id] ?? makeSession({ session_id: id, ready_for_prompt: true });
+  });
   const services = new Map<string, unknown>([
     ['tasks', tasksService],
     ['sessions', sessionsService],
@@ -181,6 +186,11 @@ describe('startup tenant database scope', () => {
     await cleanupOrphanStatuses(ctx);
 
     expect(tasksService.patch).toHaveBeenCalledTimes(queuedTasks.length);
+    expect(tasksService.patch).toHaveBeenCalledWith(
+      'queued-0',
+      { status: TaskStatus.STOPPED },
+      expect.objectContaining({ suppressTerminalQueueProcessing: true })
+    );
     expect(tasksService.find).toHaveBeenCalledWith(
       expect.objectContaining({ query: expect.objectContaining({ $skip: 1000 }) })
     );

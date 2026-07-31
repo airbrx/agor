@@ -8,6 +8,7 @@
  * Cursor run when Agor stops the executor.
  */
 
+import { resolveSdkWatchdogConfig } from '@agor/core/config';
 import { generateId, shortId } from '@agor/core/db';
 import { DEFAULT_CURSOR_MODEL } from '@agor/core/models';
 import { mergeMCPRemoteHeaders } from '@agor/core/tools/mcp/http-headers';
@@ -28,8 +29,13 @@ import { createFeathersBackedRepositories } from '../../db/feathers-repositories
 import type { ResolvedConfigSlice } from '../../payload-types.js';
 import { getMcpServersForSession } from '../../sdk-handlers/base/mcp-scoping.js';
 import type { StreamingCallbacks } from '../../sdk-handlers/base/types.js';
+import type { SdkActivityCallback } from '../../sdk-watchdog.js';
 import type { AgorClient } from '../../services/feathers-client.js';
-import type { AgenticToolOutcome, AgenticToolTaskPatch } from '../../terminal-task.js';
+import {
+  type AgenticToolOutcome,
+  type AgenticToolTaskPatch,
+  awaitRuntimeCleanup,
+} from '../../terminal-task.js';
 import { isDaemonOwnedAbort } from '../../termination-state.js';
 import {
   captureGitStateAtTaskEnd,
@@ -51,6 +57,47 @@ function stringifyForPreview(value: unknown): string {
   } catch {
     return String(value);
   }
+}
+
+export function reportCursorActivity(
+  callback: SdkActivityCallback | undefined,
+  event: SDKMessage
+): void {
+  if (event.type === 'tool_call') {
+    callback?.(
+      event.status === 'running'
+        ? {
+            type: 'operation_started',
+            id: event.call_id,
+            kind: normalizeCursorToolName(event.name),
+          }
+        : {
+            type: 'operation_finished',
+            id: event.call_id,
+            outcome: event.status,
+          }
+    );
+    return;
+  }
+  if (
+    event.type === 'assistant' ||
+    event.type === 'thinking' ||
+    event.type === 'task' ||
+    event.type === 'usage' ||
+    (event.type === 'status' && event.status === 'FINISHED')
+  ) {
+    callback?.({ type: 'progress', detail: event.type });
+    return;
+  }
+  if (
+    event.type === 'system' ||
+    event.type === 'user' ||
+    (event.type === 'status' && event.status !== 'FINISHED')
+  ) {
+    callback?.({ type: 'sdk_started', detail: event.type });
+    return;
+  }
+  callback?.({ type: 'unknown_activity', detail: event.type });
 }
 
 function toCursorModel(model: string | undefined): { id: string } {
@@ -435,6 +482,7 @@ export async function executeCursorTask(params: {
   abortController: AbortController;
   messageSource?: MessageSource;
   resolvedConfig?: ResolvedConfigSlice;
+  onActivity?: SdkActivityCallback;
 }): Promise<AgenticToolOutcome | undefined> {
   const { client, sessionId, taskId, prompt } = params;
 
@@ -450,9 +498,12 @@ export async function executeCursorTask(params: {
   const abortHandler = () => {
     if (!currentRun) return;
     console.log(`[cursor] Abort signal received; cancelling Cursor run ${currentRun.id}`);
-    abortCompletion ??= currentRun.cancel().catch((error) => {
-      console.warn('[cursor] Failed to cancel Cursor run:', error);
-    });
+    abortCompletion ??= awaitRuntimeCleanup(
+      currentRun.cancel(),
+      resolveSdkWatchdogConfig(params.resolvedConfig?.execution).abort_grace_ms,
+      'cursor'
+    );
+    void abortCompletion.catch(() => undefined);
   };
   params.abortController.signal.addEventListener('abort', abortHandler);
 
@@ -463,7 +514,7 @@ export async function executeCursorTask(params: {
     const apiKey = await resolveCursorApiKey(client, taskId);
     const session = await client.service('sessions').get(sessionId);
     const repos = createFeathersBackedRepositories(client);
-    const callbacks = createStreamingCallbacks(client, 'cursor', sessionId);
+    const callbacks = createStreamingCallbacks(client, 'cursor', sessionId, params.onActivity);
 
     if (!session.branch_id) {
       throw new Error('Cursor sessions require a branch_id so the local runtime has a cwd.');
@@ -617,13 +668,17 @@ export async function executeCursorTask(params: {
         },
       };
       if (shaAtEnd) {
-        // @ts-expect-error - Partial update of nested git_state object is handled by repository deep merge
         taskPatch.git_state = { sha_at_end: shaAtEnd };
       }
       if (isDaemonOwnedAbort(params.abortController)) return;
       return {
-        status: stopped ? TaskStatus.STOPPED : failed ? TaskStatus.FAILED : TaskStatus.COMPLETED,
-        taskPatch,
+        status: stopped || failed ? TaskStatus.FAILED : TaskStatus.COMPLETED,
+        taskPatch: stopped
+          ? {
+              ...taskPatch,
+              error_message: 'Cursor runtime stopped without a daemon termination request.',
+            }
+          : taskPatch,
       };
     } finally {
       agent.close();
@@ -637,14 +692,13 @@ export async function executeCursorTask(params: {
       error_message: err.message,
     };
     if (shaAtEnd) {
-      // @ts-expect-error - Partial update of nested git_state object is handled by repository deep merge
       taskPatch.git_state = { sha_at_end: shaAtEnd };
     }
     await createSystemErrorMessage({ client, sessionId, taskId, message: err.message });
     return {
-      status: params.abortController.signal.aborted ? TaskStatus.STOPPED : TaskStatus.FAILED,
+      status: TaskStatus.FAILED,
       taskPatch,
-      ...(params.abortController.signal.aborted ? {} : { error: err }),
+      ...(!params.abortController.signal.aborted ? { error: err } : {}),
     };
   } finally {
     params.abortController.signal.removeEventListener('abort', abortHandler);
@@ -677,6 +731,7 @@ async function handleCursorEvent(args: {
   isThinkingStarted: () => boolean;
   setThinkingStarted: (value: boolean) => void;
 }): Promise<void> {
+  reportCursorActivity(args.callbacks.onActivity, args.event);
   switch (args.event.type) {
     case 'assistant': {
       const nextText = args.event.message.content
@@ -747,10 +802,11 @@ async function handleCursorEvent(args: {
     }
 
     case 'status':
-    case 'system':
     case 'request':
     case 'task':
     case 'user':
+    case 'system':
+    case 'usage':
       return;
   }
 }

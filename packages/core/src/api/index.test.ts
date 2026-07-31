@@ -643,6 +643,7 @@ describe('createClient', () => {
       expect(tasksService.methods).toHaveBeenCalledWith(
         'connectExecutor',
         'reportTerminationComplete',
+        'reportExecutorSettlement',
         'reportRuntimeTelemetry',
         'reportSdkHealthFailure'
       );

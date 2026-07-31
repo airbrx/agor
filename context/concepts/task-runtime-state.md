@@ -44,13 +44,19 @@ Prompt
              |                    or Stop
              v                       v
    executor finalizer             STOPPING
-             |                       |
-             v             containment verified?
- COMPLETED / FAILED /         +------+------+
- STOPPED / TIMED_OUT         yes            no
-                              |             |
-                     STOPPED or FAILED  remain STOPPING
-                                        and non-promptable
+     closes runtime                  |
+             |             containment verified?
+             v               +------+------+
+ semantic settlement       yes            no
+             |              |             |
+             v       STOPPED or FAILED  remain STOPPING
+ daemon terminal guard                    and non-promptable
+             |
+             v
+ COMPLETED / FAILED / TIMED_OUT
+             |
+             v
+     Session reconciler
 ```
 
 These are deliberately separate signals. A fresh heartbeat proves wrapper
@@ -114,6 +120,7 @@ Queue materialization and draining are documented separately in
 | `executor_connected_at`      | Did an authenticated executor claim this dispatch?                     | Whether it remains reachable             |
 | `last_executor_heartbeat_at` | When could the wrapper last report to the daemon?                      | Whether the SDK made meaningful progress |
 | `latest_executor_pulse`      | What bounded SDK activity fact was most recently accepted?             | Complete history or task ownership       |
+| `latest_executor_progress`   | What was the latest accepted meaningful-progress fact?                 | Current wait or wrapper liveness         |
 | `sdk_failure`                | What runtime-health diagnosis was observed or enforced?                | Proof that execution stopped             |
 | `termination_request`        | Which termination cause owns containment, and for which request epoch? | Final containment outcome by itself      |
 
@@ -131,16 +138,19 @@ The shared pulse vocabulary is:
   evidence and fails open.
 
 Agentic-tool runtime adapters own the translation from SDK-specific events into
-this vocabulary. The common task contract must not depend on raw agentic-tool
-event names. The SDK version manifest beside the mapping makes dependency
-upgrades an explicit mapping-review point.
+this vocabulary and executor-local operation events. Operations and waits carry
+stable identities; operation progress can extend a quiet deadline, while every
+operation and wait retains an absolute deadline. The common task contract must
+not depend on raw agentic-tool event names or persist an operation ledger. The
+SDK version manifest beside the mappings makes dependency upgrades an explicit
+mapping-review point.
 
 ## Two supervisors, two failure classes
 
-| Supervisor                    | Runs in  | Observes                                             | Detects                                                                               | Default behavior on `main`                                      |
-| ----------------------------- | -------- | ---------------------------------------------------- | ------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
-| Executor heartbeat supervisor | Daemon   | Durable dispatch/connection and heartbeat timestamps | Local dispatches that never connect; connected wrappers whose heartbeat becomes stale | Requests daemon-owned containment                               |
-| SDK watchdog                  | Executor | Semantic pulses on a monotonic clock                 | No first progress; Claude post-progress stall; unknown activity                       | `observe`: persist diagnosis without aborting recognized stalls |
+| Supervisor                    | Runs in  | Observes                                             | Detects                                                                               | Default behavior on `main`                                  |
+| ----------------------------- | -------- | ---------------------------------------------------- | ------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| Executor heartbeat supervisor | Daemon   | Durable dispatch/connection and heartbeat timestamps | Local dispatches that never connect; connected wrappers whose heartbeat becomes stale | Requests daemon-owned containment                           |
+| SDK watchdog                  | Executor | Semantic pulses on a monotonic clock                 | No first progress; Claude post-progress stall; unknown activity                       | `enforce`: abort recognized stalls and hand off containment |
 
 ### Daemon heartbeat supervisor
 
@@ -161,21 +171,27 @@ upgrades an explicit mapping-review point.
 - Starts at the executor boundary, before SDK import/subscription/prompt setup,
   so a silent SDK startup is covered.
 - Uses semantic activity rather than heartbeat time.
-- Pauses while waiting for a known permission/input decision.
-- Tracks known active tool/background-task lifetimes so healthy silent work is
-  not treated as idle.
+- Pauses quiet supervision while waiting for a known permission/input decision,
+  but enforces that wait's absolute deadline.
+- Tracks parallel tool/item/background work by stable operation ID, each with
+  quiet and absolute deadlines.
 - Records unknown vocabulary once as `unknown_activity` and continues rather
   than terminating work it cannot classify.
 - In `observe` mode, writes a `would_fire` diagnosis and leaves lifecycle state
   unchanged.
-- In `enforce` mode, recognized `no_first_progress` or `progress_stalled`
-  decisions request SDK abort and hand containment to the daemon.
+- In `enforce` mode, recognized first-progress, idle, operation, or wait
+  deadline failures request SDK abort and hand containment to the daemon.
 
-On current `main`, first-progress supervision covers the mapped executor SDKs;
-Claude also has a one-hour post-progress idle timeout by default. Cursor is not
-yet wired into the SDK watchdog. Disabling executor heartbeat disables
-persisted pulse telemetry and the stale-wrapper backstop, but the executor-local
-watchdog can still make and report a direct health decision.
+First-progress supervision covers all mapped executor SDKs, including Cursor.
+Claude also has a one-hour post-progress idle timeout by default. Identified
+operations default to a four-hour absolute ceiling. Disabling wrapper heartbeat
+keeps coalesced pulse telemetry but disables periodic heartbeat writes and the
+stale-wrapper backstop; the executor-local watchdog still makes and reports
+direct health decisions. New Tasks default to `enforce`; a legacy active Task
+without a persisted watchdog mode remains observe-only for compatibility. If a
+telemetry write is rejected, the executor refreshes durable Task state; when
+the daemon already considers the Task terminal, the executor aborts its runtime
+and does not attempt another terminal settlement.
 
 ## Cooperative completion and interaction waits
 
@@ -183,9 +199,11 @@ Agentic-tool adapters return one normalized outcome containing the terminal
 status and non-lifecycle task data such as model, SDK response, context usage,
 error detail, and final git state. They do not patch terminal task state. The
 top-level executor accepts that outcome only after the adapter's SDK call and
-cooperative cleanup have settled, writes one guarded terminal patch, then stops
-its watchdog and heartbeat and exits. Process-level failure handlers use the
-same writer as a best-effort fallback.
+bounded cooperative cleanup have settled, then reports one semantic `quiesced`
+settlement to the daemon. The daemon commits terminal timing and result fields
+atomically. Process-level failure handlers never guess terminality; cleanup
+uncertainty reports `containment_required` and converges on the termination
+coordinator.
 
 The shared SDK adapter waits for its asynchronous provider stop hook before it
 returns. Cursor waits for the active run and closes the agent; OpenCode waits
@@ -197,8 +215,7 @@ Claude and Copilot permission decisions use the executor's outer abort
 controller. A denial, timeout, unavailable responder, or permission-flow error
 first aborts the agentic-tool query. Only after that query settles does the
 executor finalizer commit `failed` or `timed_out`. A `timed_out` task retains
-the historical lightweight Session projection without running normal
-completion callbacks or queue continuation.
+the same terminal reconciliation contract as other settled tasks.
 
 Executor launch payloads also declare whether the surface is `interactive` or
 `unattended`. Direct agent sessions are interactive. Scheduled and gateway
@@ -242,10 +259,22 @@ admission/UI projection:
 
 - task launch projects the session to `running` and not promptable;
 - permission and Stop states are projected while their task owns the turn;
-- terminal settlement projects the session back to its appropriate resting
-  state and may trigger queue processing;
-- reconciliation repairs a failed/not-ready session when no non-queued task
-  still owns that busy state.
+- every terminal settlement invokes `TasksService.reconcileTerminalTask`, which
+  projects the session, dispatches callbacks, finalizes the originating gateway,
+  and may trigger the oldest queued work;
+- `reconcileSessionState` is the bounded startup/route repair entry point and
+  derives the coarse projection from durable Task truth;
+- generic Session patch hooks do not independently drain the queue or finalize
+  gateways.
+
+Startup keeps the existing no-replay recovery policy: queued prompts behind an
+orphaned turn are stopped, and terminal reconciliation suppresses queue drain
+until that cleanup sweep is complete.
+
+UI and gateway consumers use the shared runtime presentation projection derived
+from Task status, latest activity, latest meaningful progress, and stall
+diagnosis. `working`, `waiting`, `stalled`, and terminal presentation are not
+persisted lifecycle states, and `running` alone does not imply progress.
 
 `Session.ready_for_prompt` is also used as an attention/acknowledgement flag. It
 is not equivalent to promptability and must not be checked alone. Use the
@@ -278,6 +307,8 @@ Preserve these invariants:
 12. Permission timeout commits terminal state only after the outer
     agentic-tool query settles.
 13. An unattended launch cannot block on an interactive permission response.
+14. Parallel operations are tracked by identity and retain absolute deadlines.
+15. Every terminal settlement invokes the idempotent Session reconciler.
 
 ## Code map
 
@@ -295,6 +326,7 @@ Preserve these invariants:
 | Stale-wrapper and dispatch supervision                                | `apps/agor-daemon/src/services/executor-heartbeat-supervisor.ts`                                       |
 | Termination claims and containment settlement                         | `apps/agor-daemon/src/termination-coordinator.ts`, `apps/agor-daemon/src/executor-tracking.ts`         |
 | Startup orphan reconciliation                                         | `apps/agor-daemon/src/startup.ts`                                                                      |
+| Shared UI/gateway runtime projection                                  | `packages/core/src/types/task.ts`, `apps/agor-daemon/src/services/gateway.ts`                          |
 
 ## Why the architecture has this shape
 

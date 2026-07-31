@@ -248,6 +248,7 @@ export async function registerServices(ctx: RegisterServicesContext): Promise<Re
       'remove',
       'connectExecutor',
       'reportTerminationComplete',
+      'reportExecutorSettlement',
       'reportRuntimeTelemetry',
       'reportSdkHealthFailure',
     ],

@@ -27,7 +27,6 @@ import type {
   MCPServerRepository,
   SessionMCPServerRepository,
 } from '../../db/feathers-repositories.js';
-import { reportSdkActivity } from '../../sdk-watchdog.js';
 import type { NormalizedSdkResponse, RawSdkResponse } from '../../types/sdk-response.js';
 import { enrichContentBlocks } from '../base/diff-enrichment.js';
 import type {
@@ -41,6 +40,34 @@ import type {
 } from '../base/index.js';
 import { getMcpServersForSession } from '../base/mcp-scoping.js';
 import type { ITool } from '../base/tool.interface.js';
+
+const OPENCODE_PROGRESS_EVENTS = new Set([
+  'file.edited',
+  'message.updated',
+  'message.part.updated',
+  'session.diff',
+  'session.updated',
+  'todo.updated',
+]);
+
+function reportOpenCodeEvent(callback: StreamingCallbacks['onActivity'], eventType: string): void {
+  if (
+    eventType === 'server.heartbeat' ||
+    eventType === 'permission.asked' ||
+    eventType === 'permission.updated' ||
+    eventType === 'permission.replied' ||
+    eventType === 'session.status' ||
+    eventType === 'message.updated' ||
+    eventType === 'message.part.updated'
+  ) {
+    return;
+  }
+  if (OPENCODE_PROGRESS_EVENTS.has(eventType)) {
+    callback?.({ type: 'progress', detail: eventType });
+    return;
+  }
+  callback?.({ type: 'unknown_activity', detail: eventType });
+}
 
 export function isOpenCodeSessionEvent(event: OpenCodeEvent, sessionId: string): boolean {
   const properties = event.properties as Record<string, unknown>;
@@ -61,6 +88,7 @@ export function isOpenCodeSessionEvent(event: OpenCodeEvent, sessionId: string):
 export interface OpenCodeConfig {
   enabled: boolean;
   serverUrl: string;
+  permissionTimeoutMs?: number;
 }
 
 /**
@@ -569,6 +597,36 @@ export class OpenCodeTool implements ITool {
       const allParts: Array<{ id: string; type: string; data: unknown }> = []; // Store all parts for later processing
       let currentTextMessageId: string | null = null;
       let currentReasoningMessageId: string | null = null;
+      let pendingPermissionId: string | undefined;
+      let permissionTimer: ReturnType<typeof setTimeout> | undefined;
+      const activeToolPartIds = new Set<string>();
+
+      const resolvePermission = (permissionId: string, outcome: string): boolean => {
+        if (pendingPermissionId !== permissionId) return false;
+        pendingPermissionId = undefined;
+        if (permissionTimer) clearTimeout(permissionTimer);
+        permissionTimer = undefined;
+        streamingCallbacks.onActivity?.({ type: 'waiting_finished', id: permissionId, outcome });
+        return true;
+      };
+      const awaitPermission = (permissionId: string): void => {
+        if (pendingPermissionId && pendingPermissionId !== permissionId) {
+          resolvePermission(pendingPermissionId, 'superseded');
+        }
+        pendingPermissionId = permissionId;
+        if (permissionTimer) clearTimeout(permissionTimer);
+        const absoluteTimeoutMs = this.config.permissionTimeoutMs ?? 600_000;
+        streamingCallbacks.onActivity?.({
+          type: 'waiting_started',
+          id: permissionId,
+          reason: 'permission',
+          absoluteTimeoutMs,
+        });
+        permissionTimer = setTimeout(() => {
+          resolvePermission(permissionId, 'timed_out');
+        }, absoluteTimeoutMs);
+        permissionTimer.unref?.();
+      };
 
       // IMPORTANT: Subscribe to event stream BEFORE sending prompt
       // Events are emitted in real-time as prompt executes
@@ -606,7 +664,14 @@ export class OpenCodeTool implements ITool {
 
           // Log event type (skip noisy heartbeats)
           const eventType = event.type as string;
-          reportSdkActivity(streamingCallbacks.onPulse, 'opencode', eventType);
+          if (eventType === 'permission.replied') {
+            const properties = event.properties as Record<string, unknown>;
+            if (typeof properties.permissionID === 'string') {
+              resolvePermission(properties.permissionID, 'resolved');
+            }
+            continue;
+          }
+          reportOpenCodeEvent(streamingCallbacks.onActivity, eventType);
           if (eventType !== 'server.heartbeat') {
             console.log('[OpenCodeTool] Event:', eventType);
           }
@@ -629,8 +694,9 @@ export class OpenCodeTool implements ITool {
               console.log(
                 `[OpenCodeTool] Auto-granting permission: id=${permId}, type=${permType}`
               );
+              awaitPermission(permId);
               try {
-                await client.postSessionIdPermissionsPermissionId({
+                const grant = await client.postSessionIdPermissionsPermissionId({
                   path: {
                     id: context.opencodeSessionId,
                     permissionID: permId,
@@ -638,7 +704,12 @@ export class OpenCodeTool implements ITool {
                   body: { response: 'always' },
                   query: branchPath ? { directory: branchPath } : undefined,
                 });
+                if (grant.error) {
+                  console.error('[OpenCodeTool] Failed to auto-grant permission:', grant.error);
+                  continue;
+                }
                 console.log(`[OpenCodeTool] Permission auto-granted (always): id=${permId}`);
+                resolvePermission(permId, 'resolved');
               } catch (permErr) {
                 console.error('[OpenCodeTool] Failed to auto-grant permission:', permErr);
               }
@@ -652,6 +723,7 @@ export class OpenCodeTool implements ITool {
               event.properties.info.sessionID === context.opencodeSessionId &&
               event.properties.info.role === 'assistant'
             ) {
+              streamingCallbacks.onActivity?.({ type: 'progress', detail: 'message.updated' });
               if (!assistantMessageId) {
                 assistantMessageId = event.properties.info.id;
                 console.log('[OpenCodeTool] Assistant message identified:', assistantMessageId);
@@ -677,6 +749,11 @@ export class OpenCodeTool implements ITool {
                 );
                 continue;
               }
+
+              streamingCallbacks.onActivity?.({
+                type: 'progress',
+                detail: 'message.part.updated',
+              });
 
               // Store this part for later processing (building final message)
               const existingPartIndex = allParts.findIndex((p) => p.id === part.id);
@@ -756,10 +833,37 @@ export class OpenCodeTool implements ITool {
                 console.log('[OpenCodeTool] Tool part data:', JSON.stringify(part, null, 2));
                 console.log('[OpenCodeTool] ===================================');
               }
+
+              if (part.type === 'tool') {
+                const toolPart = part as OpenCodePart & {
+                  tool?: string;
+                  state?: { status?: string };
+                };
+                const status = toolPart.state?.status;
+                if (status === 'completed' || status === 'error') {
+                  if (activeToolPartIds.delete(part.id)) {
+                    streamingCallbacks.onActivity?.({
+                      type: 'operation_finished',
+                      id: part.id,
+                      outcome: status,
+                    });
+                  }
+                } else if (!activeToolPartIds.has(part.id)) {
+                  activeToolPartIds.add(part.id);
+                  streamingCallbacks.onActivity?.({
+                    type: 'operation_started',
+                    id: part.id,
+                    kind: toolPart.tool ?? 'tool',
+                  });
+                } else {
+                  streamingCallbacks.onActivity?.({ type: 'operation_progress', id: part.id });
+                }
+              }
             }
 
             // Check for session idle status - indicates response is complete
             if (event.type === 'session.status' && event.properties.status.type === 'idle') {
+              streamingCallbacks.onActivity?.({ type: 'progress', detail: 'session.idle' });
               console.log('[OpenCodeTool] Session became idle, response complete');
               _responseCompleted = true;
               break; // Exit event loop
@@ -767,6 +871,15 @@ export class OpenCodeTool implements ITool {
           }
         }
       } finally {
+        if (permissionTimer) clearTimeout(permissionTimer);
+        if (pendingPermissionId) resolvePermission(pendingPermissionId, 'cancelled');
+        for (const toolPartId of activeToolPartIds) {
+          streamingCallbacks.onActivity?.({
+            type: 'operation_finished',
+            id: toolPartId,
+            outcome: 'abandoned',
+          });
+        }
         // Clean up event stream
         console.log('[OpenCodeTool] Closing event stream...');
         // Note: The SDK's async generator should clean up automatically when we break/return

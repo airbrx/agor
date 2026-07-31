@@ -38,8 +38,10 @@ function harness(reportSdkHealthFailure: () => Promise<unknown>) {
         sdk_watchdog: {
           mode: 'enforce',
           first_progress_timeout_ms: 1_000,
+          operation_absolute_timeout_ms: 10_000,
           abort_grace_ms: 100,
           claude_idle_timeout_ms: null,
+          codex_idle_timeout_ms: null,
         },
       },
     },
@@ -74,8 +76,10 @@ describe('AgorExecutor watchdog handoff', () => {
           sdk_watchdog: {
             mode: 'observe',
             first_progress_timeout_ms: 60_000,
+            operation_absolute_timeout_ms: 600_000,
             abort_grace_ms: 100,
             claude_idle_timeout_ms: null,
+            codex_idle_timeout_ms: null,
           },
         },
       },
@@ -95,8 +99,9 @@ describe('AgorExecutor watchdog handoff', () => {
 
   it('persists one normalized outcome after adapter cleanup and before stopping liveness', async () => {
     const tasks = {
-      get: vi.fn().mockResolvedValue({ task_id: 'task-1', status: 'running' }),
-      patch: vi.fn().mockResolvedValue({ task_id: 'task-1', status: 'completed' }),
+      reportExecutorSettlement: vi
+        .fn()
+        .mockResolvedValue({ task_id: 'task-1', status: 'completed' }),
     };
     let settleAdapter!: (value: { status: 'completed'; taskPatch: { model: string } }) => void;
     runtime.execute.mockReturnValueOnce(
@@ -119,7 +124,7 @@ describe('AgorExecutor watchdog handoff', () => {
 
     const execution = executor.executeTask();
     await vi.waitFor(() => expect(runtime.execute).toHaveBeenCalledOnce());
-    expect(tasks.patch).not.toHaveBeenCalled();
+    expect(tasks.reportExecutorSettlement).not.toHaveBeenCalled();
 
     settleAdapter({
       status: 'completed',
@@ -128,15 +133,16 @@ describe('AgorExecutor watchdog handoff', () => {
     await execution;
 
     expect(runtime.stopHeartbeat).toHaveBeenCalledOnce();
-    expect(tasks.patch).toHaveBeenCalledWith('task-1', {
-      model: 'openai/test-model',
+    expect(tasks.reportExecutorSettlement).toHaveBeenCalledWith({
+      task_id: 'task-1',
+      kind: 'quiesced',
       status: 'completed',
-      completed_at: expect.any(String),
+      task_patch: { model: 'openai/test-model' },
     });
     expect(runtime.execute.mock.invocationCallOrder[0]).toBeLessThan(
-      tasks.patch.mock.invocationCallOrder[0]!
+      tasks.reportExecutorSettlement.mock.invocationCallOrder[0]!
     );
-    expect(tasks.patch.mock.invocationCallOrder[0]).toBeLessThan(
+    expect(tasks.reportExecutorSettlement.mock.invocationCallOrder[0]).toBeLessThan(
       runtime.stopHeartbeat.mock.invocationCallOrder[0]!
     );
   });
@@ -195,6 +201,34 @@ describe('AgorExecutor watchdog handoff', () => {
       task_id: 'task-1',
       requested_at: '2026-07-23T12:00:00.000Z',
     });
+  });
+
+  it('relinquishes runtime ownership when the daemon already settled the Task', () => {
+    const heartbeatStop = vi.fn();
+    const watchdogStop = vi.fn();
+    const executor = new AgorExecutor({
+      sessionToken: 'token',
+      sessionId: 'session-1',
+      taskId: 'task-1',
+      prompt: 'prompt',
+      tool: 'codex',
+      daemonUrl: 'http://daemon',
+    }) as unknown as {
+      heartbeat: { stop: typeof heartbeatStop } | null;
+      watchdog: { stop: typeof watchdogStop } | null;
+      abortController: AbortController;
+      handleTaskLifecycleUpdate(task: unknown): void;
+    };
+    executor.heartbeat = { stop: heartbeatStop };
+    executor.watchdog = { stop: watchdogStop };
+
+    executor.handleTaskLifecycleUpdate({ task_id: 'task-1', status: 'failed' });
+
+    expect(executor.abortController.signal.aborted).toBe(true);
+    expect(heartbeatStop).toHaveBeenCalledOnce();
+    expect(watchdogStop).toHaveBeenCalledOnce();
+    expect(executor.heartbeat).toBeNull();
+    expect(executor.watchdog).toBeNull();
   });
 
   it('handles the private task-scoped termination socket event', () => {

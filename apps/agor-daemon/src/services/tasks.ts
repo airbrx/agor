@@ -29,6 +29,7 @@ import { type Application, BadRequest, Conflict } from '@agor/core/feathers';
 import { deriveTitleFromPrompt } from '@agor/core/sessions';
 import type {
   ContentBlock,
+  ExecutorSettlementInput,
   ExecutorTerminationCompleteInput,
   Paginated,
   QueryParams,
@@ -42,7 +43,9 @@ import type {
   UUID,
 } from '@agor/core/types';
 import {
+  deriveTaskRuntimeProgressState,
   ExecutorPulseKind,
+  isTaskExecuting,
   isTerminalTaskStatus,
   SDK_WATCHDOG_FAILURE_REASONS,
   SessionStatus,
@@ -62,6 +65,7 @@ import {
 } from '../utils/executor-heartbeat-callback.js';
 import { ensureRepoOriginAlignedById } from '../utils/realign-repo-origin';
 import { deferWithTenantContext } from '../utils/tenant-db-scope.js';
+import type { GatewayService } from './gateway.js';
 import type { SessionsService } from './sessions';
 
 /**
@@ -71,6 +75,7 @@ const COMPLETION_SIDE_EFFECT_TASK_STATUSES = new Set<Task['status']>([
   TaskStatus.COMPLETED,
   TaskStatus.FAILED,
   TaskStatus.STOPPED,
+  TaskStatus.TIMED_OUT,
 ]);
 
 function isAnalyticsTerminalTaskStatus(status: Task['status'] | undefined): boolean {
@@ -425,7 +430,7 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
       // a late CLI confirmation has no caller and drains here instead.
       suppressTerminalQueueProcessing: !isStop || params?.suppressTerminalQueueProcessing === true,
     };
-    const sessionProjected = await this.processCompletionSideEffects(
+    const sessionProjected = await this.reconcileTerminalTask(
       result.task,
       result.task.status,
       completionParams
@@ -510,6 +515,29 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
     );
   }
 
+  private async updateGatewayRuntimeProjectionAfterCommit(
+    task: Task,
+    params?: TaskParams
+  ): Promise<void> {
+    const state = deriveTaskRuntimeProgressState(task);
+    if (state !== 'working' && state !== 'waiting' && state !== 'stalled') return;
+    await this.runAfterTenantDatabaseCommit('updateGatewayRuntimeProjection', async () => {
+      try {
+        await (this.app.service('gateway') as unknown as GatewayService).updateProgress({
+          session_id: task.session_id,
+          task_id: task.task_id,
+          state,
+          ...(task.error_message ? { error_message: task.error_message } : {}),
+        });
+      } catch (error) {
+        console.warn(
+          `[gateway] Failed to project runtime state for Task ${shortId(task.task_id)}:`,
+          error
+        );
+      }
+    });
+  }
+
   private projectTerminalSession(
     task: Task,
     status: Task['status'],
@@ -518,14 +546,66 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
     return this.app.service('sessions').patch(
       task.session_id,
       {
-        status: status === TaskStatus.FAILED ? SessionStatus.FAILED : SessionStatus.IDLE,
+        status:
+          status === TaskStatus.FAILED
+            ? SessionStatus.FAILED
+            : status === TaskStatus.TIMED_OUT
+              ? SessionStatus.TIMED_OUT
+              : SessionStatus.IDLE,
         ready_for_prompt: true,
       },
       params
     ) as Promise<Session>;
   }
 
-  private async processCompletionSideEffects(
+  /**
+   * Repair the coarse Session projection from durable Task truth. This is the
+   * bounded startup/route repair entry point; normal terminal settlement uses
+   * reconcileTerminalTask so terminal callbacks and gateway delivery share
+   * the same owner.
+   */
+  async reconcileSessionState(sessionId: string, params?: TaskParams): Promise<Session> {
+    const tasks = await this.taskRepo.findBySession(sessionId);
+    const activeTask = [...tasks].reverse().find(isTaskExecuting);
+    if (activeTask) {
+      const status =
+        activeTask.status === TaskStatus.STOPPING
+          ? SessionStatus.STOPPING
+          : activeTask.status === TaskStatus.AWAITING_PERMISSION
+            ? SessionStatus.AWAITING_PERMISSION
+            : activeTask.status === TaskStatus.AWAITING_INPUT
+              ? SessionStatus.AWAITING_INPUT
+              : SessionStatus.RUNNING;
+      return this.app
+        .service('sessions')
+        .patch(sessionId, { status, ready_for_prompt: false }, params) as Promise<Session>;
+    }
+
+    const latestTerminalTask = [...tasks]
+      .reverse()
+      .find((task) => isTerminalTaskStatus(task.status));
+    if (latestTerminalTask) {
+      await this.reconcileTerminalTask(latestTerminalTask, latestTerminalTask.status, params);
+      return this.app.service('sessions').get(sessionId, params) as Promise<Session>;
+    }
+
+    return this.app
+      .service('sessions')
+      .patch(
+        sessionId,
+        { status: SessionStatus.IDLE, ready_for_prompt: true },
+        params
+      ) as Promise<Session>;
+  }
+
+  /**
+   * Idempotently reconcile the Session-level consequences of a terminal Task.
+   *
+   * Task terminality is the durable trigger. Adapters, Session hooks, and
+   * process-exit handlers must not independently project terminal state or
+   * drain dependent work.
+   */
+  async reconcileTerminalTask(
     task: Task,
     status: Task['status'],
     params?: TaskParams
@@ -603,6 +683,25 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
         }
       }
 
+      await this.runAfterTenantDatabaseCommit('finalizeGatewayTurn', async () => {
+        try {
+          const gateway = this.app.service('gateway') as unknown as GatewayService;
+          await gateway.flushOutboundBuffer(task.session_id);
+          await gateway.updateProgress({
+            session_id: task.session_id,
+            task_id: task.task_id,
+            state:
+              status === TaskStatus.FAILED || status === TaskStatus.TIMED_OUT ? 'failed' : 'done',
+            ...(task.error_message ? { error_message: task.error_message } : {}),
+          });
+        } catch (error) {
+          console.warn(
+            `[gateway] Failed to finalize terminal Task ${shortId(task.task_id)}:`,
+            error
+          );
+        }
+      });
+
       if (!params?.suppressTerminalQueueProcessing) {
         await this.triggerQueueProcessingAfterCommit(task.session_id, params);
       } else {
@@ -652,8 +751,6 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
     const isCompletionSideEffectTransition =
       isCompletionSideEffectTaskStatus(nextStatus) &&
       !isCompletionSideEffectTaskStatus(currentTask?.status);
-    const isTimeoutTransition =
-      nextStatus === TaskStatus.TIMED_OUT && currentTask?.status !== TaskStatus.TIMED_OUT;
     const isRunningTransition =
       nextStatus === TaskStatus.RUNNING && currentTask?.status !== TaskStatus.RUNNING;
 
@@ -665,32 +762,13 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
       this.trackTaskStarted(result as Task);
     }
 
-    // Emit analytics for terminal task transitions, including timeouts that do not
-    // run the broader task-completion side effects below.
     if (isAnalyticsTerminalTransition) {
       const task = result as Task;
       this.trackTaskCompleted(task);
     }
 
-    // Permission timeouts now become terminal only after the executor has
-    // quiesced. Keep their existing lightweight Session projection here while
-    // deliberately preserving the historical no-callback/no-queue behavior.
-    if (isTimeoutTransition && !Array.isArray(result)) {
-      await this.app.service('sessions').patch(
-        (result as Task).session_id,
-        {
-          status: SessionStatus.TIMED_OUT,
-          ready_for_prompt: true,
-        },
-        params
-      );
-    }
-
-    // Run completion side effects only for statuses that historically completed
-    // executor turns. Timeout paths patch session state separately and should not
-    // enqueue callbacks, mark sessions promptable, archive forks, or drain queues here.
     if (isCompletionSideEffectTransition) {
-      await this.processCompletionSideEffects(result as Task, data.status!, params);
+      await this.reconcileTerminalTask(result as Task, data.status!, params);
     }
 
     return result;
@@ -710,6 +788,14 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
     if (!parentSessionId) return;
 
     try {
+      const latestTask = (await this.taskRepo.findById(task.task_id)) ?? task;
+      if (latestTask.metadata?.btw_result_delivery?.parent_session_id === parentSessionId) {
+        console.log(
+          `⏭️  [TasksService] BTW result for task ${shortId(task.task_id)} already delivered`
+        );
+        return;
+      }
+
       const messagesService = this.app.service('messages');
 
       // Fetch all messages from the btw fork's task to extract prompt + response
@@ -792,7 +878,7 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
       const previewText = `Q: ${promptText.substring(0, 80)} → A: ${responseText.substring(0, 100)}`;
 
       // Create via service so FeathersJS broadcasts the `created` event to all clients
-      await appendSystemMessage({
+      const delivered = await appendSystemMessage({
         app: this.app,
         db: this.db,
         sessionId: parentSessionId,
@@ -814,6 +900,19 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
           source: 'agor',
         },
       });
+      await super.patch(
+        task.task_id,
+        {
+          metadata: {
+            btw_result_delivery: {
+              parent_session_id: parentSessionId,
+              message_id: delivered.message_id,
+              delivered_at: new Date().toISOString(),
+            },
+          },
+        },
+        _params
+      );
 
       console.log(
         `💬 [TasksService] Injected btw result message into parent session ${shortId(parentSessionId)} from btw fork ${shortId(btwSession.session_id)}`
@@ -1271,6 +1370,42 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
     return task;
   }
 
+  async reportExecutorSettlement(
+    data: ExecutorSettlementInput,
+    params?: TaskParams
+  ): Promise<Task> {
+    if (data.kind === 'containment_required') {
+      return beginExecutorTermination({
+        app: this.app,
+        taskId: data.task_id,
+        cause: 'runtime_cleanup_failed',
+        errorMessage: data.error_message,
+        params,
+      });
+    }
+
+    const result = await this.taskRepo.settleExecutorOutcome({
+      taskId: data.task_id,
+      status: data.status,
+      taskPatch: data.task_patch,
+    });
+    if (result.outcome !== 'transitioned') return result.task;
+
+    emitServiceEvent(this.app, {
+      path: 'tasks',
+      event: 'patched',
+      data: result.task,
+      id: result.task.task_id,
+      params,
+    });
+    this.trackTaskCompleted(result.task);
+    await this.reconcileTerminalTask(result.task, result.task.status, {
+      ...(params ?? {}),
+      provider: undefined,
+    });
+    return result.task;
+  }
+
   async recordExecutorStartupWarning(
     taskId: string,
     warning: string,
@@ -1290,8 +1425,9 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
   }
 
   async reportRuntimeTelemetry(data: RuntimeTelemetryInput, params?: TaskParams): Promise<Task> {
-    if (data.pulse) {
-      const { sequence, kind, detail } = data.pulse;
+    for (const pulse of [data.pulse, data.progress]) {
+      if (!pulse) continue;
+      const { sequence, kind, detail } = pulse;
       if (!Number.isSafeInteger(sequence) || sequence <= 0) {
         throw new BadRequest('pulse sequence must be a positive safe integer');
       }
@@ -1305,8 +1441,15 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
         throw new BadRequest('pulse detail must be a bounded identifier');
       }
     }
+    if (data.progress && data.progress.kind !== ExecutorPulseKind.PROGRESS) {
+      throw new BadRequest('retained progress pulse must have progress kind');
+    }
 
-    const task = await this.taskRepo.reportRuntimeTelemetry(data.task_id, data.pulse);
+    const task = await this.taskRepo.reportRuntimeTelemetry(
+      data.task_id,
+      data.pulse,
+      data.progress
+    );
     if (!task) throw new Conflict(`Task ${shortId(data.task_id)} is not connected and active`);
     analyticsLogger.track(
       'executor.heartbeat',
@@ -1328,6 +1471,7 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
       id: task.task_id,
       params,
     });
+    await this.updateGatewayRuntimeProjectionAfterCommit(task, params);
     return task;
   }
 
@@ -1337,6 +1481,7 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
     for (const [name, value] of Object.entries({
       elapsed_ms: data.elapsed_ms,
       unknown_event_count: data.unknown_event_count,
+      pulse_sequence_at_detection: data.pulse_sequence_at_detection,
     })) {
       if (value !== undefined && (!Number.isSafeInteger(value) || value < 0)) {
         throw new BadRequest(`${name} must be a non-negative safe integer`);
@@ -1378,6 +1523,7 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
       detected_at: new Date().toISOString(),
       tool: session.agentic_tool,
       last_pulse: current.latest_executor_pulse,
+      pulse_sequence_at_detection: data.pulse_sequence_at_detection,
       elapsed_ms: data.elapsed_ms,
       watchdog_action: action,
       unknown_event_count: data.unknown_event_count,
@@ -1394,10 +1540,11 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
         id: observed.task_id,
         params,
       });
+      await this.updateGatewayRuntimeProjectionAfterCommit(observed, params);
       return observed;
     }
 
-    return beginExecutorTermination({
+    const stopping = await beginExecutorTermination({
       app: this.app,
       taskId: current.task_id,
       cause: 'sdk_health_failure',
@@ -1406,6 +1553,8 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
       signalDelayMs: resolveSdkWatchdogConfig(this.app.get?.('config')?.execution).abort_grace_ms,
       sdkFailure: failure,
     });
+    await this.updateGatewayRuntimeProjectionAfterCommit(stopping, params);
+    return stopping;
   }
 
   /**
@@ -1433,25 +1582,6 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
       },
       params
     )) as Task;
-
-    // Set the session's ready_for_prompt flag to true when task completes successfully
-    if (completedTask.session_id && this.app) {
-      try {
-        await this.app.service('sessions').patch(
-          completedTask.session_id,
-          {
-            ready_for_prompt: true,
-          },
-          params
-        );
-      } catch (error) {
-        console.error('❌ Failed to set ready_for_prompt flag:', error);
-      }
-    } else {
-      console.warn(
-        `⚠️ Cannot set ready_for_prompt: session_id=${completedTask.session_id}, app=${!!this.app}`
-      );
-    }
 
     return completedTask;
   }

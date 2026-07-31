@@ -40,7 +40,6 @@ const checks = [
       'apps/agor-daemon/src/register-hooks.ts': 1,
       'apps/agor-daemon/src/register-services.ts': 11,
       'apps/agor-daemon/src/register-routes.ts': 10,
-      'apps/agor-daemon/src/startup.ts': 1,
       'apps/agor-daemon/src/services/artifacts.test.ts': 1,
       'apps/agor-daemon/src/services/artifacts.ts': 1,
       'apps/agor-daemon/src/services/boards.ts': 2,

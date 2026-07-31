@@ -216,8 +216,9 @@ async function cleanupOrphanStatusesInTenantScope(
 
   // Wipe the queue BEFORE making any session promptable. Running tasks are marked STOPPED above,
   // which invalidates the ordering premise of anything waiting behind them — a queued prompt
-  // typically depends on whatever was running first. Wiping here prevents the session after-patch
-  // hook (triggered below) from draining queued tasks that should be discarded.
+  // typically depends on whatever was running first. Wiping here with queue
+  // continuation suppressed prevents terminal reconciliation from starting
+  // queued tasks that should be discarded.
   const queuedTasks = await collectAllPages<Task>(
     (skip) =>
       tasksService.find({
@@ -233,7 +234,7 @@ async function cleanupOrphanStatusesInTenantScope(
         {
           status: TaskStatus.STOPPED,
         },
-        startupParams as never
+        { ...startupParams, suppressTerminalQueueProcessing: true } as never
       );
     }
   }
@@ -260,18 +261,12 @@ async function cleanupOrphanStatusesInTenantScope(
 
   if (orphanedSessions.length > 0) {
     for (const session of orphanedSessions) {
-      // IMPORTANT: Use app.service() instead of sessionsService to go through
-      // FeathersJS service layer and trigger app.publish() for WebSocket events
-      await app.service('sessions').patch(
-        session.session_id,
-        {
-          status: SessionStatus.IDLE,
-          ready_for_prompt: true,
-        },
-        startupParams as never
-      );
+      await tasksService.reconcileSessionState(session.session_id, {
+        ...startupParams,
+        suppressTerminalQueueProcessing: true,
+      } as never);
       startupDebug(
-        `   ✓ Marked session ${shortId(session.session_id)} as idle (was: ${session.status})`
+        `   ✓ Reconciled session ${shortId(session.session_id)} from Task truth (was: ${session.status})`
       );
     }
   }
@@ -284,20 +279,17 @@ async function cleanupOrphanStatusesInTenantScope(
   if (sessionIdsWithOrphanedTasks.size > 0) {
     for (const sessionId of sessionIdsWithOrphanedTasks) {
       const session = await sessionsService.get(sessionId as Id, startupParams as never);
-      // If session is still in an active state after orphaned task cleanup, set to IDLE
+      // If session is still in an active state after orphaned task cleanup,
+      // repair it through the same Task-owned reconciler used at settlement.
       if (
         session.status === SessionStatus.RUNNING ||
         session.status === SessionStatus.STOPPING ||
         session.status === SessionStatus.AWAITING_PERMISSION ||
         session.status === SessionStatus.TIMED_OUT
       ) {
-        await app.service('sessions').patch(
-          sessionId as Id,
-          {
-            status: SessionStatus.IDLE,
-            ready_for_prompt: true,
-          },
-          startupParams as never
+        await tasksService.reconcileSessionState(
+          sessionId as string,
+          { ...startupParams, suppressTerminalQueueProcessing: true } as never
         );
         sessionsResetFromOrphanedTasks++;
         startupDebug(
@@ -355,9 +347,10 @@ async function cleanupOrphanStatusesInTenantScope(
     }
 
     stuckIdleSessions.push(session);
-    await app
-      .service('sessions')
-      .patch(session.session_id, { ready_for_prompt: true }, startupParams as never);
+    await tasksService.reconcileSessionState(session.session_id, {
+      ...startupParams,
+      suppressTerminalQueueProcessing: true,
+    } as never);
     startupDebug(
       `   ✓ Unblocked stuck-idle session ${shortId(session.session_id)} (ready_for_prompt was false, latest task interrupted)`
     );
