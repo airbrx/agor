@@ -60,6 +60,8 @@ export interface DbConfig {
     min?: number;
     max?: number;
     idleTimeout?: number;
+    /** Seconds a new connection may take to become ready before failing. Default 15. */
+    connectTimeout?: number;
   };
 
   /**
@@ -213,6 +215,16 @@ function createPostgresDatabase(config: DbConfig): PostgresJsDatabase<typeof pos
       // Recycle connections after 5 minutes so the pool doesn't hold onto
       // connections that the server-side proxy has silently closed.
       max_lifetime: 300,
+      // Bound how long a *new* connection may hang before the caller gives up.
+      // postgres.js defaults connect_timeout to 30s, so an occasional stalled
+      // TLS handshake/startup to the database surfaces as `write CONNECT_TIMEOUT`
+      // only after a full 30s block — long enough to fail an agent start or a
+      // background indexer tick outright. This is establishment only (the TCP
+      // connect itself is sub-millisecond on a healthy VPC path); a genuinely
+      // slow handshake still has ample room under 15s, while a hung one now
+      // fails fast so the caller retries on a fresh socket instead of stalling.
+      // Configurable via `database.pool.connectTimeout` (seconds).
+      connect_timeout: config.pool?.connectTimeout || 15,
       // Disable prepared statements - they can cause issues with DDL statements like CREATE SCHEMA
       // and with Drizzle's migration system
       prepare: false,
