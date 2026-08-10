@@ -52,8 +52,21 @@ async function readStdin(): Promise<string> {
   return Buffer.concat(chunks).toString('utf-8');
 }
 
-function emitExecutorResult(result: unknown): void {
-  console.log(`AGOR_EXECUTOR_RESULT ${JSON.stringify(result)}`);
+/**
+ * Emit the sentinel result line and resolve only once it has flushed to stdout.
+ *
+ * `console.log`/`process.stdout.write` is asynchronous when stdout is a pipe —
+ * which is exactly how the daemon captures the executor. A `process.exit()`
+ * immediately after the write terminates the process before the pipe drains, so
+ * the result line is lost and the daemon reports "exited 0 but did not emit a
+ * JSON result" even though the command succeeded (e.g. an upload that already
+ * materialized to disk). Awaiting the write callback before exiting closes that
+ * race. The write callback fires once the data has been handed to the OS.
+ */
+function emitExecutorResult(result: unknown): Promise<void> {
+  return new Promise((resolve) => {
+    process.stdout.write(`AGOR_EXECUTOR_RESULT ${JSON.stringify(result)}\n`, () => resolve());
+  });
 }
 
 function emitInteractiveEvent(event: unknown): void {
@@ -106,7 +119,8 @@ async function handleStdinMode(options: { dryRun: boolean }): Promise<void> {
     const result = await executeCommand(payload, { dryRun: options.dryRun });
 
     // Output result on a sentinel line so daemon parsers can suppress it from logs.
-    emitExecutorResult(result);
+    // Await the flush so a failure result isn't truncated by the process.exit below.
+    await emitExecutorResult(result);
 
     if (!result.success) {
       process.exit(1);
@@ -122,7 +136,8 @@ async function handleStdinMode(options: { dryRun: boolean }): Promise<void> {
   const result = await executeCommand(payload, { dryRun: options.dryRun });
 
   // Output result on a sentinel line so daemon parsers can suppress it from logs.
-  emitExecutorResult(result);
+  // Await the flush before process.exit() so the line isn't truncated on the pipe.
+  await emitExecutorResult(result);
 
   process.exit(result.success ? 0 : 1);
 }
@@ -150,10 +165,10 @@ async function handleInteractiveCommandMode(options: { dryRun: boolean }): Promi
         },
       }
     );
-    emitExecutorResult(result);
+    await emitExecutorResult(result);
     process.exitCode = result.success ? 0 : 1;
   } catch {
-    emitExecutorResult({
+    await emitExecutorResult({
       success: false,
       error: {
         code: 'INTERACTIVE_COMMAND_PROTOCOL_INVALID',
