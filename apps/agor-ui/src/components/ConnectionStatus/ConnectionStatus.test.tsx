@@ -57,6 +57,9 @@ describe('ConnectionStatus', () => {
       ...window.location,
       reload: reloadSpy,
     });
+    // Auto-reload is rate-limited via a per-tab sessionStorage stamp; clear it
+    // so each test starts un-throttled.
+    sessionStorage.clear();
   });
 
   afterEach(() => {
@@ -78,26 +81,46 @@ describe('ConnectionStatus', () => {
     expect(onRetry).toHaveBeenCalledOnce();
   });
 
-  it('escalates to "Still reconnecting" after STUCK_RECONNECT_MS (20s)', () => {
-    const retry = vi.fn();
-    render(<ConnectionStatus connected={false} connecting={true} onRetry={retry} />);
+  it('escalates to "Still reconnecting" after STUCK_RECONNECT_MS (20s) and auto-reloads', () => {
+    render(<ConnectionStatus connected={false} connecting={true} />);
     expect(screen.getByText('Reconnecting…')).toBeInTheDocument();
 
-    // Sub-threshold: still Reconnecting.
+    // Sub-threshold: still Reconnecting, no reload.
     act(() => {
       vi.advanceTimersByTime(19_000);
     });
     expect(screen.getByText('Reconnecting…')).toBeInTheDocument();
+    expect(reloadSpy).not.toHaveBeenCalled();
 
-    // Crosses 20s threshold on the next per-second tick.
+    // Crosses 20s threshold on the next per-second tick: tag escalates to the
+    // "Still reconnecting" copy…
     act(() => {
       vi.advanceTimersByTime(2_000);
     });
-    const tag = screen.getByText('Still reconnecting');
-    expect(tag).toBeInTheDocument();
-    fireEvent.click(tag);
-    expect(retry).toHaveBeenCalledOnce();
+    expect(screen.getByText('Still reconnecting')).toBeInTheDocument();
+
+    // …and the page auto-reloads without a click (flush the 0ms reload timer).
+    act(() => {
+      vi.advanceTimersByTime(1);
+    });
+    expect(reloadSpy).toHaveBeenCalledOnce();
+  });
+
+  it('auto-reloads a settled "Disconnected" state after a debounce, and only once', () => {
+    render(<ConnectionStatus connected={false} connecting={false} />);
+    expect(screen.getByText('Disconnected')).toBeInTheDocument();
+
+    // Not immediate — a transient transport handoff must not trigger a reload.
+    act(() => {
+      vi.advanceTimersByTime(7_000);
+    });
     expect(reloadSpy).not.toHaveBeenCalled();
+
+    // After DISCONNECTED_AUTO_RELOAD_MS (8s), it reloads exactly once.
+    act(() => {
+      vi.advanceTimersByTime(2_000);
+    });
+    expect(reloadSpy).toHaveBeenCalledOnce();
   });
 
   it('shows brief green "Connected" flash after a short reconnect (< stale threshold)', () => {

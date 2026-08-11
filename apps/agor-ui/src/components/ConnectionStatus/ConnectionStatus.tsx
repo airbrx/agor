@@ -48,6 +48,27 @@ const STALE_AUTO_DISMISS_MS = 60_000;
 /** How long the green "Connected" flash lingers after a short reconnect. */
 const CONNECTED_FLASH_MS = 3_000;
 
+/**
+ * How long a settled "Disconnected" (`!connected && !connecting`) state must
+ * persist before we auto-reload. Long enough that a transient transport
+ * handoff doesn't trigger a reload; short enough to recover promptly.
+ */
+const DISCONNECTED_AUTO_RELOAD_MS = 8_000;
+
+/**
+ * Minimum spacing between auto-reloads, tracked per-tab in sessionStorage.
+ * A stuck reconnect is almost always an expired edge-auth session (e.g. an
+ * ALB authenticate-oidc / JumpCloud session hitting SessionTimeout): a reload
+ * lets the browser follow the IdP redirect and silently re-login. But if the
+ * daemon is genuinely down, the post-reload page can't connect either — this
+ * guard caps that to one reload per interval instead of a tight loop. Larger
+ * than STUCK_RECONNECT_MS so a persistent outage doesn't reload every 20s.
+ */
+const AUTO_RELOAD_MIN_INTERVAL_MS = 45_000;
+
+/** Per-tab sessionStorage key holding the last auto-reload timestamp. */
+const AUTO_RELOAD_STAMP_KEY = 'agor:connection-status:auto-reload-at';
+
 interface StatusTagProps {
   tooltip: ReactNode;
   icon: ReactNode;
@@ -196,6 +217,41 @@ export const ConnectionStatus: React.FC<ConnectionStatusProps> = ({
     return () => clearTimeout(id);
   }, [staleSince]);
 
+  const stuckTooLong =
+    connecting &&
+    disconnectStartedAt !== null &&
+    Date.now() - disconnectStartedAt >= STUCK_RECONNECT_MS;
+
+  // Auto-reload out of a terminal disconnect. The dominant cause on a
+  // reverse-proxied deployment is an expired edge-auth session (the ALB
+  // authenticate-oidc / JumpCloud session hitting its SessionTimeout): the
+  // websocket and XHRs can't follow the IdP's 302, so the socket wedges. A
+  // full-page navigation CAN follow the redirect, so reloading silently
+  // re-runs login and restores the session — the same thing the user would do
+  // by hand, one less manual step. `outOfSync` is deliberately excluded so its
+  // "reload to pick up a redeploy" cue stays manual (it fires while still
+  // connected, where unsaved work is likely and preservable). Guarded by a
+  // per-tab stamp so a genuinely-down daemon can't spin in a reload loop.
+  useEffect(() => {
+    const terminal = !outOfSync && (stuckTooLong || (!connected && !connecting));
+    if (!terminal) return;
+    // Escalated stuck reconnect has already burned STUCK_RECONNECT_MS, so
+    // reload now; a fresh "Disconnected" gets a short debounce against flaps.
+    const delay = stuckTooLong ? 0 : DISCONNECTED_AUTO_RELOAD_MS;
+    const id = setTimeout(() => {
+      const now = Date.now();
+      const last = Number(sessionStorage.getItem(AUTO_RELOAD_STAMP_KEY) ?? '0');
+      if (Number.isFinite(last) && now - last < AUTO_RELOAD_MIN_INTERVAL_MS) return;
+      try {
+        sessionStorage.setItem(AUTO_RELOAD_STAMP_KEY, String(now));
+      } catch {
+        // sessionStorage unavailable (rare private-mode edge cases); reload anyway.
+      }
+      window.location.reload();
+    }, delay);
+    return () => clearTimeout(id);
+  }, [stuckTooLong, connected, connecting, outOfSync]);
+
   // --- 1. Out of sync (highest priority) ---
   // Backend redeployed under us. Reload is mandatory because the bundled UI
   // may reference removed services. No auto-reload, since it would nuke a
@@ -213,13 +269,14 @@ export const ConnectionStatus: React.FC<ConnectionStatusProps> = ({
     );
   }
 
-  const stuckTooLong =
-    connecting &&
-    disconnectStartedAt !== null &&
-    Date.now() - disconnectStartedAt >= STUCK_RECONNECT_MS;
-
   // --- 2. Still reconnecting (escalated stuck state) ---
-  // Retry the existing client; routine network recovery must not discard drafts.
+  // `stuckTooLong` is derived above (the auto-reload effect depends on it), so
+  // it is intentionally not redefined here. The effect auto-reloads on this
+  // state — immediately, since STUCK_RECONNECT_MS has already elapsed — so this
+  // tag normally renders for only a moment before the page reloads; it also
+  // shows while the loop-guard holds a reload back (post-reload, still can't
+  // connect). The manual retry stays as the escape hatch; routine network
+  // recovery must not discard drafts.
   if (stuckTooLong) {
     return (
       <StatusTag
