@@ -210,7 +210,17 @@ export function registerWidgetTools(server: McpServer, ctx: McpContext): void {
                 widget_id: widgetId,
               },
             },
-            { ...ctx.baseServiceParams, route: { id: currentSessionId } }
+            // provider: undefined — this is a daemon-internal producer that
+            // legitimately stamps idempotencyTaskId + system_authored metadata.
+            // baseServiceParams carries provider:'mcp' (the transport of the
+            // agent's tool call), which /sessions/:id/prompt treats as an
+            // external caller and rejects with
+            //   Forbidden: idempotencyTaskId is internal-only
+            // (register-routes.ts). The message_range patch above and the
+            // gateway-token tool below already null provider for the same
+            // reason; the already_present short-circuit was the caller that
+            // forgot, so the env-vars widget failed for every already-set var.
+            { ...ctx.baseServiceParams, provider: undefined, route: { id: currentSessionId } }
           );
         }
         return textResult({ widget_id: widgetId, status: 'already_present' });
