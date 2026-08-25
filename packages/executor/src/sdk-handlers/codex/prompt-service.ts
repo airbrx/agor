@@ -45,6 +45,7 @@ import type { CodexSandboxMode, ContextUsageSnapshot, MCPServer } from '@agor/co
 import { getDefaultPermissionMode, isGatewaySession } from '@agor/core/types';
 import { mapToCodexPermissionConfig } from '@agor/core/utils/permission-mode-mapper';
 import type * as CodexSdk from '@openai/codex-sdk';
+import { isPathInsideRoot } from '../../commands/branch-filesystem.js';
 import { getDaemonUrl } from '../../config.js';
 import type {
   BranchRepository,
@@ -57,6 +58,7 @@ import type {
   UsersRepository,
 } from '../../db/feathers-repositories.js';
 import { McpAuthDiagnosticAccumulator } from '../../diagnostics/mcp-auth-diagnostic-accumulator.js';
+import { createGit } from '../../git/index.js';
 import { reportSdkActivity, type SdkActivityCallback } from '../../sdk-watchdog.js';
 import type { TokenUsage } from '../../types/token-usage.js';
 import type { PermissionMode, SessionID, TaskID, UserID } from '../../types.js';
@@ -1226,6 +1228,37 @@ export class CodexPromptService {
     // here (not config.toml); ThreadOptions override matching `--config` keys.
     // model + modelReasoningEffort are passed through from session.model_config
     // so the UI's per-session model picker actually controls what Codex runs.
+    // In a linked worktree, the checkout is at branch.path but its git metadata
+    // and the shared object store live under the MAIN repo's .git (the
+    // git-common-dir), OUTSIDE branch.path. Codex's workspace-write sandbox only
+    // grants the cwd, so `git commit` fails writing the index/refs/objects and
+    // the model reports "git metadata is read-only". Add the git-common-dir as
+    // an extra writable root (Codex `--add-dir` / sandbox_workspace_write
+    // writable_roots) so commits work without dropping to danger-full-access.
+    //
+    // Scoped tightly: only workspace-write needs it (read-only is blocked by
+    // design; danger-full-access is already unrestricted), and only when the
+    // git dir is actually outside the cwd — a plain non-worktree clone keeps
+    // .git inside branch.path and is guarded out, so behavior there is unchanged.
+    const additionalDirectories: string[] = [];
+    if (sandboxMode === 'workspace-write') {
+      try {
+        // simple-git only (createGit), per repo git policy — no subprocess.
+        const { git } = createGit(branch.path);
+        const gitCommonDir = (
+          await git.raw(['rev-parse', '--path-format=absolute', '--git-common-dir'])
+        ).trim();
+        if (gitCommonDir && !isPathInsideRoot(branch.path, gitCommonDir)) {
+          additionalDirectories.push(gitCommonDir);
+        }
+      } catch (err) {
+        // Best-effort: on any resolution failure leave the sandbox exactly as it
+        // is today rather than fail the turn. Worst case is the pre-patch
+        // behavior (commit blocked), never a regression elsewhere.
+        codexDebug(`   Could not resolve git-common-dir for sandbox writable root: ${err}`);
+      }
+    }
+
     const sessionModel = session.model_config?.model;
     const sessionEffort = session.model_config?.effort;
     const threadOptions = {
@@ -1234,6 +1267,9 @@ export class CodexPromptService {
       sandboxMode,
       approvalPolicy,
       networkAccessEnabled: networkAccess,
+      // Worktree git metadata lives outside the cwd; grant it as a writable root
+      // so workspace-write Codex sessions can commit. See computation above.
+      ...(additionalDirectories.length ? { additionalDirectories } : {}),
       ...(sessionModel ? { model: sessionModel } : {}),
       // Codex CLI accepts `max`; the SDK's ModelReasoningEffort type currently lags it.
       ...(sessionEffort ? { modelReasoningEffort: sessionEffort as CodexSdkReasoningEffort } : {}),
