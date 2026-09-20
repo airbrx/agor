@@ -2049,6 +2049,7 @@ export const boardObjects = pgTable(
       .$type<{
         position: { x: number; y: number };
         zone_id?: string; // Optional zone pinning
+        zone_added_at?: string; // ISO time last pinned to zone_id (newest-first zone ordering)
       }>()
       .notNull(),
   },

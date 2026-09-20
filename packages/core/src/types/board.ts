@@ -46,6 +46,12 @@ export interface BoardEntityObject {
   /** Zone this entity is pinned to (optional) */
   zone_id?: string;
 
+  /** ISO timestamp of when this entity was last added to its current zone.
+   *  Set/refreshed only when `zone_id` changes to a non-null zone; cleared when
+   *  unpinned. Used to order a zone's worktree list newest-added-first. Absent
+   *  on memberships created before this field existed (fall back to name order). */
+  zone_added_at?: string;
+
   /** Ephemeral PATCH correlation echoed in the response/event; never persisted or used for access. */
   placement_write_id?: string;
 

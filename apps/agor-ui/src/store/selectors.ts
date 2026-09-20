@@ -140,24 +140,29 @@ export interface ZoneMember {
   objectId: string;
   branchId: string;
   branch: Branch;
+  /** ISO time this worktree was added to the zone; drives newest-first order.
+   *  Undefined for memberships created before zone_added_at existed. */
+  zoneAddedAt?: string;
 }
 
 const EMPTY_ZONE_MEMBERS: ZoneMember[] = Object.freeze([] as ZoneMember[]) as ZoneMember[];
 
 /**
  * The worktrees pinned to one zone (board-objects with `zone_id === zoneId`),
- * resolved to their branches and sorted deterministically by branch name.
+ * resolved to their branches and sorted newest-added-first.
  *
  * RBAC is inherited for free: `boardObjectsByBoardId` is already viewer-filtered
  * server-side (v0.26.4 SQL visibility pushdown), so a member the viewer may not
  * see is never in this list — the zone's list and its count badge both count
  * only viewer-visible rows without any extra filtering here.
  *
- * Ordering is name-only: v0.26.4 exposes no client-queryable last-activity
- * timestamp on the board-object row, so we sort by name (deterministic, no
- * schema change) rather than adding a field. Returns a fresh array per run —
- * subscribe with `useStoreWithEqualityFn(..., shallow)` so the list re-renders
- * only when membership or a member branch's identity changes.
+ * Ordering is by `zone_added_at` descending (most recently dropped into the zone
+ * on top). ISO timestamps compare lexicographically, so a string compare is a
+ * chronological compare. Memberships pinned before `zone_added_at` existed have
+ * no timestamp; they sort after the timestamped rows, by name, so the order is
+ * always deterministic. Returns a fresh array per run — subscribe with
+ * `useStoreWithEqualityFn(..., shallow)` so the list re-renders only when
+ * membership or a member branch's identity changes.
  */
 export function makeZoneMembersSelector(
   boardId: string | null | undefined,
@@ -172,10 +177,21 @@ export function makeZoneMembersSelector(
       if (bo.zone_id !== zoneId || !bo.branch_id) continue;
       const branch = s.branchById.get(bo.branch_id);
       if (branch) {
-        members.push({ objectId: bo.object_id, branchId: bo.branch_id, branch });
+        members.push({
+          objectId: bo.object_id,
+          branchId: bo.branch_id,
+          branch,
+          zoneAddedAt: bo.zone_added_at,
+        });
       }
     }
-    members.sort((a, b) => a.branch.name.localeCompare(b.branch.name));
+    members.sort((a, b) => {
+      // Newest zone-add first; timestamped rows always precede legacy ones.
+      if (a.zoneAddedAt && b.zoneAddedAt) return b.zoneAddedAt.localeCompare(a.zoneAddedAt);
+      if (a.zoneAddedAt) return -1;
+      if (b.zoneAddedAt) return 1;
+      return a.branch.name.localeCompare(b.branch.name);
+    });
     return members.length ? members : EMPTY_ZONE_MEMBERS;
   };
 }
