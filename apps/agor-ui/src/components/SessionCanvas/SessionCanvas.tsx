@@ -800,6 +800,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       eraserMode: activeTool === 'eraser',
       activeUrlTargetArtifactId,
       onEditMarkdown: handleEditMarkdownNote,
+      onOpenBranch,
       canEdit: canEditBoard,
     });
 
@@ -925,6 +926,17 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
           onInvalid: (entityId, invalidZoneId, reason) =>
             warnInvalidZoneRef('branch', entityId, invalidZoneId, reason),
         });
+
+        // List-only when pinned: a worktree with a valid zone parent renders as a
+        // compact row inside the zone (ZoneWorktreeList), not as a full branchNode
+        // on the canvas. Suppress its node here. Worktrees free on the canvas
+        // (no valid zone parent) still render as today's full card below.
+        // A stale/unrenderable zone_id falls through to a normal free card so a
+        // deleted zone never strands its members off-canvas.
+        if (validZoneParentId) {
+          return;
+        }
+
         const zoneObj = validZoneParentId ? board?.objects?.[validZoneParentId] : undefined;
         const zoneColor =
           zoneObj && zoneObj.type === 'zone'

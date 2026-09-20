@@ -131,6 +131,56 @@ export function makeBranchesForBoardSelector(
 }
 
 /**
+ * A worktree pinned to a zone: the board-object that carries the membership
+ * (`zone_id`) plus the resolved branch it points at. `object_id` is the id used
+ * for the `board-objects.patch({ zone_id })` re-parent, `branch_id` is the React
+ * Flow node id / open-worktree key.
+ */
+export interface ZoneMember {
+  objectId: string;
+  branchId: string;
+  branch: Branch;
+}
+
+const EMPTY_ZONE_MEMBERS: ZoneMember[] = Object.freeze([] as ZoneMember[]) as ZoneMember[];
+
+/**
+ * The worktrees pinned to one zone (board-objects with `zone_id === zoneId`),
+ * resolved to their branches and sorted deterministically by branch name.
+ *
+ * RBAC is inherited for free: `boardObjectsByBoardId` is already viewer-filtered
+ * server-side (v0.26.4 SQL visibility pushdown), so a member the viewer may not
+ * see is never in this list — the zone's list and its count badge both count
+ * only viewer-visible rows without any extra filtering here.
+ *
+ * Ordering is name-only: v0.26.4 exposes no client-queryable last-activity
+ * timestamp on the board-object row, so we sort by name (deterministic, no
+ * schema change) rather than adding a field. Returns a fresh array per run —
+ * subscribe with `useStoreWithEqualityFn(..., shallow)` so the list re-renders
+ * only when membership or a member branch's identity changes.
+ */
+export function makeZoneMembersSelector(
+  boardId: string | null | undefined,
+  zoneId: string | null | undefined
+): (s: AgorState) => ZoneMember[] {
+  return (s) => {
+    if (!boardId || !zoneId) return EMPTY_ZONE_MEMBERS;
+    const objects = s.boardObjectsByBoardId.get(boardId);
+    if (!objects?.length) return EMPTY_ZONE_MEMBERS;
+    const members: ZoneMember[] = [];
+    for (const bo of objects) {
+      if (bo.zone_id !== zoneId || !bo.branch_id) continue;
+      const branch = s.branchById.get(bo.branch_id);
+      if (branch) {
+        members.push({ objectId: bo.object_id, branchId: bo.branch_id, branch });
+      }
+    }
+    members.sort((a, b) => a.branch.name.localeCompare(b.branch.name));
+    return members.length ? members : EMPTY_ZONE_MEMBERS;
+  };
+}
+
+/**
  * Count of unresolved top-level comments on one board (the header badge).
  * Scalar result: comment patches elsewhere — or edits that don't change the
  * count — leave the subscriber untouched.
