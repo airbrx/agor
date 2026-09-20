@@ -1007,6 +1007,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
         // Every board-object/zone/text/markdown write goes through this guard.
         guard: boardGuard,
         onWriteFailed: resyncBoardNodes,
+        onOpenBranch,
       });
 
     // Extract zone labels - memoized to only change when labels actually change
@@ -1134,6 +1135,17 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
           onInvalid: (entityId, invalidZoneId, reason) =>
             warnInvalidZoneRef('branch', entityId, invalidZoneId, reason),
         });
+
+        // List-only when pinned: a worktree with a valid zone parent renders as a
+        // compact row inside the zone (ZoneWorktreeList), not as a full branchNode
+        // on the canvas. Suppress its node here. Worktrees free on the canvas
+        // (no valid zone parent) still render as today's full card below.
+        // A stale/unrenderable zone_id falls through to a normal free card so a
+        // deleted zone never strands its members off-canvas.
+        if (validZoneParentId) {
+          return;
+        }
+
         const zoneObj = validZoneParentId ? board?.objects?.[validZoneParentId] : undefined;
         const zoneColor =
           zoneObj && zoneObj.type === 'zone'
