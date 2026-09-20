@@ -389,6 +389,9 @@ export class BoardObjectRepository {
         data: {
           position: data.position,
           zone_id: data.zone_id,
+          // Stamp zone-add time when an object is created already pinned, so the
+          // zone's newest-first ordering is correct from creation.
+          ...(data.zone_id ? { zone_added_at: new Date().toISOString() } : {}),
         },
       };
 
@@ -440,6 +443,9 @@ export class BoardObjectRepository {
           data: {
             position,
             zone_id: existingData.zone_id,
+            // Preserve zone-add time across a pure position update; a reposition
+            // is not a re-add, so it must not bump the object in zone ordering.
+            ...(existingData.zone_added_at ? { zone_added_at: existingData.zone_added_at } : {}),
           },
         })
         .where(eq(boardObjects.object_id, objectId))
@@ -485,12 +491,26 @@ export class BoardObjectRepository {
       const existingData =
         typeof existing.data === 'string' ? JSON.parse(existing.data) : existing.data;
 
+      // Convert null to undefined for consistency
+      const nextZoneId = zoneId === null ? undefined : zoneId;
+      // Zone-add time: refresh to now only when the object enters a DIFFERENT
+      // (non-null) zone, or is pinned for the first time. Re-pinning the same
+      // zone preserves the original add time (so it doesn't jump the ordering);
+      // unpinning drops it. Absent for objects pinned before this field existed.
+      let nextZoneAddedAt: string | undefined;
+      if (nextZoneId) {
+        nextZoneAddedAt =
+          existingData.zone_id === nextZoneId && existingData.zone_added_at
+            ? existingData.zone_added_at
+            : new Date().toISOString();
+      }
+
       await update(this.db, boardObjects)
         .set({
           data: {
             position: existingData.position,
-            // Convert null to undefined for consistency
-            zone_id: zoneId === null ? undefined : zoneId,
+            zone_id: nextZoneId,
+            ...(nextZoneAddedAt ? { zone_added_at: nextZoneAddedAt } : {}),
           },
         })
         .where(eq(boardObjects.object_id, objectId))
@@ -617,6 +637,7 @@ export class BoardObjectRepository {
       entity_type: entityType,
       position: data.position,
       zone_id: data.zone_id,
+      zone_added_at: data.zone_added_at,
       created_at: new Date(row.created_at).toISOString(),
     };
   }
