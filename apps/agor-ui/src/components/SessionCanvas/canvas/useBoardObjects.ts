@@ -26,6 +26,8 @@ interface UseBoardObjectsProps {
    *  "selected" outline. */
   activeUrlTargetArtifactId?: string | null;
   onEditMarkdown?: (objectId: string, content: string, width: number) => void;
+  /** Open a pinned worktree in its drawer (row click / row "open" action). */
+  onOpenBranch?: (branchId: string) => void;
   /** Effective board.edit permission, resolved by the canvas. */
   canEdit?: boolean;
 }
@@ -46,6 +48,7 @@ export const useBoardObjects = ({
   eraserMode = false,
   activeUrlTargetArtifactId,
   onEditMarkdown,
+  onOpenBranch,
   canEdit = true,
 }: UseBoardObjectsProps) => {
   // Use ref to avoid recreating callbacks when board changes
@@ -144,6 +147,30 @@ export const useBoardObjects = ({
       } catch (error) {
         console.error('Failed to reorder object:', error);
         showError('Failed to reorder zone');
+      }
+    },
+    [client, showError]
+  );
+
+  /**
+   * Re-parent (or detach) a pinned worktree by patching its board-object's
+   * `zone_id`. This is the row-level cross-zone move: dropping a worktree row on
+   * another zone passes that zone's id; dropping it out to empty canvas (or the
+   * "remove from zone" action) passes `null`, which returns it to the canvas as
+   * a full card. Same-zone moves are filtered by the caller (no-op).
+   *
+   * Uses the same `board-objects` PATCH endpoint the node-drag path uses; no
+   * position is sent, so the daemon keeps the worktree's stored placement and
+   * only membership changes. `null` serializes (undefined would be stripped).
+   */
+  const patchWorktreeZone = useCallback(
+    async (objectId: string, zoneId: string | null) => {
+      if (!canEditRef.current || !canMutateRef.current || !client) return;
+      try {
+        await client.service('board-objects').patch(objectId, { zone_id: zoneId });
+      } catch (error) {
+        console.error('Failed to move worktree between zones:', error);
+        showError('Failed to move worktree');
       }
     },
     [client, showError]
@@ -411,6 +438,9 @@ export const useBoardObjects = ({
             trigger: objectData.type === 'zone' ? objectData.trigger : undefined,
             pinnedItemCount,
             canEdit,
+            boardId: boardRef.current?.board_id,
+            onOpenWorktree: onOpenBranch,
+            onWorktreePatchZone: patchWorktreeZone,
             overlappingZoneCount:
               objectData.type === 'zone'
                 ? zoneEntries.filter(
@@ -441,6 +471,8 @@ export const useBoardObjects = ({
     deleteObject,
     deleteArtifact,
     reorderObject,
+    patchWorktreeZone,
+    onOpenBranch,
     eraserMode,
     activeUrlTargetArtifactId,
     onEditMarkdown,
@@ -558,6 +590,7 @@ export const useBoardObjects = ({
     deleteObject,
     deleteZone,
     reorderObject,
+    patchWorktreeZone,
     batchUpdateObjectPositions,
   };
 };
