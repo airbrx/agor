@@ -176,7 +176,12 @@ export function makeZoneMembersSelector(
     for (const bo of objects) {
       if (bo.zone_id !== zoneId || !bo.branch_id) continue;
       const branch = s.branchById.get(bo.branch_id);
-      if (branch) {
+      // Skip archived branches: an archived worktree's full card disappears from
+      // the free canvas (its `branches` prop is pre-filtered), so its zone row
+      // must vanish the same way — otherwise archiving a pinned worktree leaves a
+      // stale row stuck in the zone. `branchById` retains archived branches, so
+      // filter here to match canvas behavior.
+      if (branch && !branch.archived) {
         members.push({
           objectId: bo.object_id,
           branchId: bo.branch_id,
