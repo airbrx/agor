@@ -355,6 +355,75 @@ const BranchNode = React.memo(
   }
 );
 
+// Props threaded into the worktree card modal. Mirrors the handler set that
+// BranchNode passes to BranchCard so the modal renders an identical full card.
+interface WorktreeCardModalProps {
+  branch: Branch;
+  repo: Repo;
+  boardId?: string | null;
+  currentUserId?: string;
+  selectedSessionId?: string | null;
+  client: AgorClient | null;
+  onTaskClick?: (taskId: string) => void;
+  onSessionClick?: (sessionId: string) => void;
+  onCreateSession?: (branchId: string) => void;
+  onForkSession?: (sessionId: string, prompt: string) => Promise<void>;
+  onSpawnSession?: (sessionId: string, config: string | Partial<SpawnConfig>) => Promise<void>;
+  onArchiveOrDelete?: (branchId: string, options: BranchArchiveOrDeleteOptions) => void;
+  onOpenSettings?: (branchId: string) => void;
+  onOpenSessionSettings?: (sessionId: string) => void;
+  onOpenTerminal?: (commands: string[], branchId?: string) => void;
+  onStartEnvironment?: (branchId: string) => void;
+  onStopEnvironment?: (branchId: string) => void;
+  onViewLogs?: (branchId: string) => void;
+  onNukeEnvironment?: (branchId: string) => void;
+  onExecuteScheduleNow?: (branchId: string) => Promise<void>;
+}
+
+// Renders a pinned worktree's full BranchCard inside a modal. Subscribes to the
+// branch's session slice + the user map itself (same reactive path BranchNode
+// uses) so streaming updates keep the modal live without the parent rebuilding
+// every node. The worktree remains pinned in its zone — this modal only
+// surfaces the card that the compact zone row otherwise hides.
+const WorktreeCardModal = React.memo(
+  ({ branch, repo, boardId, ...handlers }: WorktreeCardModalProps) => {
+    const sessionsSelector = useMemo(
+      () => makeSessionsForBranchSelector(branch.branch_id),
+      [branch.branch_id]
+    );
+    const sessions = useAgorStore(sessionsSelector) ?? EMPTY_SESSIONS;
+    const userById = useAgorStore(selectUserById);
+    return (
+      <BranchCard
+        branch={branch}
+        repo={repo}
+        sessions={sessions}
+        progressiveMountKey={boardId ?? 'no-board'}
+        userById={userById}
+        currentUserId={handlers.currentUserId}
+        selectedSessionId={handlers.selectedSessionId}
+        onTaskClick={handlers.onTaskClick}
+        onSessionClick={handlers.onSessionClick}
+        onCreateSession={handlers.onCreateSession}
+        onForkSession={handlers.onForkSession}
+        onSpawnSession={handlers.onSpawnSession}
+        onArchiveOrDelete={handlers.onArchiveOrDelete}
+        onOpenSettings={handlers.onOpenSettings}
+        onOpenSessionSettings={handlers.onOpenSessionSettings}
+        onOpenTerminal={handlers.onOpenTerminal}
+        onStartEnvironment={handlers.onStartEnvironment}
+        onStopEnvironment={handlers.onStopEnvironment}
+        onViewLogs={handlers.onViewLogs}
+        onNukeEnvironment={handlers.onNukeEnvironment}
+        onExecuteScheduleNow={handlers.onExecuteScheduleNow}
+        isPinned={false}
+        client={handlers.client}
+      />
+    );
+  }
+);
+WorktreeCardModal.displayName = 'WorktreeCardModal';
+
 // Define nodeTypes outside component to avoid recreation on every render
 const nodeTypes = {
   sessionNode: SessionNode,
@@ -544,6 +613,14 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
     // Card modal state
     const [selectedCard, setSelectedCard] = useState<CardWithType | null>(null);
     const [cardModalOpen, setCardModalOpen] = useState(false);
+
+    // Worktree card modal state — opened from a zone's compact worktree row.
+    // The worktree stays PINNED in the zone; this modal just surfaces its full
+    // BranchCard (distinct from the branch-settings drawer).
+    const [openWorktreeModalBranchId, setOpenWorktreeModalBranchId] = useState<string | null>(null);
+    const handleOpenWorktreeCard = useCallback((branchId: string) => {
+      setOpenWorktreeModalBranchId(branchId);
+    }, []);
 
     // Tool state for canvas annotations
     const [activeTool, setActiveTool] = useState<
@@ -835,7 +912,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       eraserMode: activeTool === 'eraser',
       activeUrlTargetArtifactId,
       onEditMarkdown: handleEditMarkdownNote,
-      onOpenBranch,
+      onOpenWorktreeCard: handleOpenWorktreeCard,
       onWorktreeZoneTrigger: handleWorktreeZoneTrigger,
       canEdit: canEditBoard,
     });
@@ -3286,6 +3363,48 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             }}
           />
         )}
+
+        {/* Worktree Card Modal — opened from a zone's compact worktree row.
+            The worktree stays pinned; this surfaces its full BranchCard. */}
+        <Modal
+          open={!!openWorktreeModalBranchId}
+          onCancel={() => setOpenWorktreeModalBranchId(null)}
+          footer={null}
+          width={680}
+          destroyOnClose
+        >
+          {(() => {
+            if (!openWorktreeModalBranchId) return null;
+            const branch = branches.find((b) => b.branch_id === openWorktreeModalBranchId);
+            if (!branch) return null;
+            const repo = repoById.get(branch.repo_id);
+            if (!repo) return null;
+            return (
+              <WorktreeCardModal
+                branch={branch}
+                repo={repo}
+                boardId={board?.board_id ?? null}
+                currentUserId={currentUserId}
+                selectedSessionId={selectedSessionId}
+                client={client}
+                onTaskClick={onTaskClick}
+                onSessionClick={onSessionClick}
+                onCreateSession={onCreateSessionForBranch}
+                onForkSession={onForkSession}
+                onSpawnSession={onSpawnSession}
+                onArchiveOrDelete={onArchiveOrDeleteBranch}
+                onOpenSettings={onOpenBranch}
+                onOpenSessionSettings={onOpenSettings}
+                onOpenTerminal={onOpenTerminal}
+                onStartEnvironment={onStartEnvironment}
+                onStopEnvironment={onStopEnvironment}
+                onViewLogs={onViewLogs}
+                onNukeEnvironment={onNukeEnvironment}
+                onExecuteScheduleNow={onExecuteScheduleNow}
+              />
+            );
+          })()}
+        </Modal>
       </div>
     );
   }
