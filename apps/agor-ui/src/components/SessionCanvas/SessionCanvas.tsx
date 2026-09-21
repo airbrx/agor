@@ -355,6 +355,75 @@ const BranchNode = React.memo(
   }
 );
 
+// Props threaded into the worktree card modal. Mirrors the handler set that
+// BranchNode passes to BranchCard so the modal renders an identical full card.
+interface WorktreeCardModalProps {
+  branch: Branch;
+  repo: Repo;
+  boardId?: string | null;
+  currentUserId?: string;
+  selectedSessionId?: string | null;
+  client: AgorClient | null;
+  onTaskClick?: (taskId: string) => void;
+  onSessionClick?: (sessionId: string) => void;
+  onCreateSession?: (branchId: string) => void;
+  onForkSession?: (sessionId: string, prompt: string) => Promise<void>;
+  onSpawnSession?: (sessionId: string, config: string | Partial<SpawnConfig>) => Promise<void>;
+  onArchiveOrDelete?: (branchId: string, options: BranchArchiveOrDeleteOptions) => void;
+  onOpenSettings?: (branchId: string) => void;
+  onOpenSessionSettings?: (sessionId: string) => void;
+  onOpenTerminal?: (commands: string[], branchId?: string) => void;
+  onStartEnvironment?: (branchId: string) => void;
+  onStopEnvironment?: (branchId: string) => void;
+  onViewLogs?: (branchId: string) => void;
+  onNukeEnvironment?: (branchId: string) => void;
+  onExecuteScheduleNow?: (branchId: string) => Promise<void>;
+}
+
+// Renders a pinned worktree's full BranchCard inside a modal. Subscribes to the
+// branch's session slice + the user map itself (same reactive path BranchNode
+// uses) so streaming updates keep the modal live without the parent rebuilding
+// every node. The worktree remains pinned in its zone — this modal only
+// surfaces the card that the compact zone row otherwise hides.
+const WorktreeCardModal = React.memo(
+  ({ branch, repo, boardId, ...handlers }: WorktreeCardModalProps) => {
+    const sessionsSelector = useMemo(
+      () => makeSessionsForBranchSelector(branch.branch_id),
+      [branch.branch_id]
+    );
+    const sessions = useAgorStore(sessionsSelector) ?? EMPTY_SESSIONS;
+    const userById = useAgorStore(selectUserById);
+    return (
+      <BranchCard
+        branch={branch}
+        repo={repo}
+        sessions={sessions}
+        progressiveMountKey={boardId ?? 'no-board'}
+        userById={userById}
+        currentUserId={handlers.currentUserId}
+        selectedSessionId={handlers.selectedSessionId}
+        onTaskClick={handlers.onTaskClick}
+        onSessionClick={handlers.onSessionClick}
+        onCreateSession={handlers.onCreateSession}
+        onForkSession={handlers.onForkSession}
+        onSpawnSession={handlers.onSpawnSession}
+        onArchiveOrDelete={handlers.onArchiveOrDelete}
+        onOpenSettings={handlers.onOpenSettings}
+        onOpenSessionSettings={handlers.onOpenSessionSettings}
+        onOpenTerminal={handlers.onOpenTerminal}
+        onStartEnvironment={handlers.onStartEnvironment}
+        onStopEnvironment={handlers.onStopEnvironment}
+        onViewLogs={handlers.onViewLogs}
+        onNukeEnvironment={handlers.onNukeEnvironment}
+        onExecuteScheduleNow={handlers.onExecuteScheduleNow}
+        isPinned={false}
+        client={handlers.client}
+      />
+    );
+  }
+);
+WorktreeCardModal.displayName = 'WorktreeCardModal';
+
 // Define nodeTypes outside component to avoid recreation on every render
 const nodeTypes = {
   sessionNode: SessionNode,
@@ -544,6 +613,14 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
     // Card modal state
     const [selectedCard, setSelectedCard] = useState<CardWithType | null>(null);
     const [cardModalOpen, setCardModalOpen] = useState(false);
+
+    // Worktree card modal state — opened from a zone's compact worktree row.
+    // The worktree stays PINNED in the zone; this modal just surfaces its full
+    // BranchCard (distinct from the branch-settings drawer).
+    const [openWorktreeModalBranchId, setOpenWorktreeModalBranchId] = useState<string | null>(null);
+    const handleOpenWorktreeCard = useCallback((branchId: string) => {
+      setOpenWorktreeModalBranchId(branchId);
+    }, []);
 
     // Tool state for canvas annotations
     const [activeTool, setActiveTool] = useState<
@@ -790,6 +867,41 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       [canMutateBoard]
     );
 
+    // Fire a zone's trigger when a worktree ROW is dropped into it (the zone-list
+    // cross-zone move). The card-drag path (handleNodeDragStop) already does this;
+    // the row-drag path patches zone_id directly, so without this it would move the
+    // worktree but never trigger. Mirrors the card path: always_new fires the
+    // server trigger; show_picker opens the branch trigger modal. Caller guarantees
+    // this only runs on an actual zone change (same-zone drop is a no-op upstream).
+    const handleWorktreeZoneTrigger = useCallback(
+      (branchId: string, zoneId: string) => {
+        if (!client) return;
+        const zoneObj = board?.objects?.[zoneId];
+        if (zoneObj?.type !== 'zone') return;
+        const trigger = zoneObj.trigger;
+        if (!trigger) return;
+        if (trigger.behavior === 'always_new') {
+          (async () => {
+            try {
+              await client.service(`branches/${branchId}/fire-zone-trigger`).create({ zoneId });
+            } catch (error) {
+              console.error('❌ Failed to execute always_new trigger (row drop):', error);
+            }
+          })();
+        } else {
+          setBranchTriggerModal({
+            actionId: ++nextBranchTriggerActionIdRef.current,
+            branchId: branchId as BranchID,
+            zoneName: zoneObj.label,
+            zoneId,
+            trigger,
+            sessions: agorStore.getState().sessionsByBranch.get(branchId) ?? EMPTY_SESSIONS,
+          });
+        }
+      },
+      [client, board]
+    );
+
     // Board objects hook
     const { getBoardObjectNodes, batchUpdateObjectPositions, deleteObject } = useBoardObjects({
       board,
@@ -800,6 +912,8 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       eraserMode: activeTool === 'eraser',
       activeUrlTargetArtifactId,
       onEditMarkdown: handleEditMarkdownNote,
+      onOpenWorktreeCard: handleOpenWorktreeCard,
+      onWorktreeZoneTrigger: handleWorktreeZoneTrigger,
       canEdit: canEditBoard,
     });
 
@@ -925,6 +1039,17 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
           onInvalid: (entityId, invalidZoneId, reason) =>
             warnInvalidZoneRef('branch', entityId, invalidZoneId, reason),
         });
+
+        // List-only when pinned: a worktree with a valid zone parent renders as a
+        // compact row inside the zone (ZoneWorktreeList), not as a full branchNode
+        // on the canvas. Suppress its node here. Worktrees free on the canvas
+        // (no valid zone parent) still render as today's full card below.
+        // A stale/unrenderable zone_id falls through to a normal free card so a
+        // deleted zone never strands its members off-canvas.
+        if (validZoneParentId) {
+          return;
+        }
+
         const zoneObj = validZoneParentId ? board?.objects?.[validZoneParentId] : undefined;
         const zoneColor =
           zoneObj && zoneObj.type === 'zone'
@@ -3238,6 +3363,62 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             }}
           />
         )}
+
+        {/* Worktree Card overlay — opened from a zone's compact worktree row.
+            The worktree stays pinned; this surfaces its full BranchCard.
+            The card IS the surface: antd Modal is used only as the backdrop +
+            portal + Esc/focus-trap. All modal chrome is stripped (transparent
+            content, no shadow, no padding, no close X) so there's no frame
+            around the card and no white halo. Close via backdrop click or Esc. */}
+        <Modal
+          open={!!openWorktreeModalBranchId}
+          onCancel={() => setOpenWorktreeModalBranchId(null)}
+          footer={null}
+          closable={false}
+          centered
+          // BranchCard sets its OWN width (500 base, ~880 when a session peek is
+          // open); fit-content lets the backdrop-only shell hug the card at either.
+          width="fit-content"
+          // antd v6 semantic key for the panel (was `content` in v5) is `container`;
+          // strip its bg/shadow/padding so the card itself is the only surface.
+          styles={{
+            container: { padding: 0, background: 'transparent', boxShadow: 'none' },
+            body: { padding: 0, overflow: 'visible' },
+          }}
+          destroyOnClose
+        >
+          {(() => {
+            if (!openWorktreeModalBranchId) return null;
+            const branch = branches.find((b) => b.branch_id === openWorktreeModalBranchId);
+            if (!branch) return null;
+            const repo = repoById.get(branch.repo_id);
+            if (!repo) return null;
+            return (
+              <WorktreeCardModal
+                branch={branch}
+                repo={repo}
+                boardId={board?.board_id ?? null}
+                currentUserId={currentUserId}
+                selectedSessionId={selectedSessionId}
+                client={client}
+                onTaskClick={onTaskClick}
+                onSessionClick={onSessionClick}
+                onCreateSession={onCreateSessionForBranch}
+                onForkSession={onForkSession}
+                onSpawnSession={onSpawnSession}
+                onArchiveOrDelete={onArchiveOrDeleteBranch}
+                onOpenSettings={onOpenBranch}
+                onOpenSessionSettings={onOpenSettings}
+                onOpenTerminal={onOpenTerminal}
+                onStartEnvironment={onStartEnvironment}
+                onStopEnvironment={onStopEnvironment}
+                onViewLogs={onViewLogs}
+                onNukeEnvironment={onNukeEnvironment}
+                onExecuteScheduleNow={onExecuteScheduleNow}
+              />
+            );
+          })()}
+        </Modal>
       </div>
     );
   }

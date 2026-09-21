@@ -131,6 +131,77 @@ export function makeBranchesForBoardSelector(
 }
 
 /**
+ * A worktree pinned to a zone: the board-object that carries the membership
+ * (`zone_id`) plus the resolved branch it points at. `object_id` is the id used
+ * for the `board-objects.patch({ zone_id })` re-parent, `branch_id` is the React
+ * Flow node id / open-worktree key.
+ */
+export interface ZoneMember {
+  objectId: string;
+  branchId: string;
+  branch: Branch;
+  /** ISO time this worktree was added to the zone; drives newest-first order.
+   *  Undefined for memberships created before zone_added_at existed. */
+  zoneAddedAt?: string;
+}
+
+const EMPTY_ZONE_MEMBERS: ZoneMember[] = Object.freeze([] as ZoneMember[]) as ZoneMember[];
+
+/**
+ * The worktrees pinned to one zone (board-objects with `zone_id === zoneId`),
+ * resolved to their branches and sorted newest-added-first.
+ *
+ * RBAC is inherited for free: `boardObjectsByBoardId` is already viewer-filtered
+ * server-side (v0.26.4 SQL visibility pushdown), so a member the viewer may not
+ * see is never in this list — the zone's list and its count badge both count
+ * only viewer-visible rows without any extra filtering here.
+ *
+ * Ordering is by `zone_added_at` descending (most recently dropped into the zone
+ * on top). ISO timestamps compare lexicographically, so a string compare is a
+ * chronological compare. Memberships pinned before `zone_added_at` existed have
+ * no timestamp; they sort after the timestamped rows, by name, so the order is
+ * always deterministic. Returns a fresh array per run — subscribe with
+ * `useStoreWithEqualityFn(..., shallow)` so the list re-renders only when
+ * membership or a member branch's identity changes.
+ */
+export function makeZoneMembersSelector(
+  boardId: string | null | undefined,
+  zoneId: string | null | undefined
+): (s: AgorState) => ZoneMember[] {
+  return (s) => {
+    if (!boardId || !zoneId) return EMPTY_ZONE_MEMBERS;
+    const objects = s.boardObjectsByBoardId.get(boardId);
+    if (!objects?.length) return EMPTY_ZONE_MEMBERS;
+    const members: ZoneMember[] = [];
+    for (const bo of objects) {
+      if (bo.zone_id !== zoneId || !bo.branch_id) continue;
+      const branch = s.branchById.get(bo.branch_id);
+      // Skip archived branches: an archived worktree's full card disappears from
+      // the free canvas (its `branches` prop is pre-filtered), so its zone row
+      // must vanish the same way — otherwise archiving a pinned worktree leaves a
+      // stale row stuck in the zone. `branchById` retains archived branches, so
+      // filter here to match canvas behavior.
+      if (branch && !branch.archived) {
+        members.push({
+          objectId: bo.object_id,
+          branchId: bo.branch_id,
+          branch,
+          zoneAddedAt: bo.zone_added_at,
+        });
+      }
+    }
+    members.sort((a, b) => {
+      // Newest zone-add first; timestamped rows always precede legacy ones.
+      if (a.zoneAddedAt && b.zoneAddedAt) return b.zoneAddedAt.localeCompare(a.zoneAddedAt);
+      if (a.zoneAddedAt) return -1;
+      if (b.zoneAddedAt) return 1;
+      return a.branch.name.localeCompare(b.branch.name);
+    });
+    return members.length ? members : EMPTY_ZONE_MEMBERS;
+  };
+}
+
+/**
  * Count of unresolved top-level comments on one board (the header badge).
  * Scalar result: comment patches elsewhere — or edits that don't change the
  * count — leave the subscriber untouched.

@@ -22,10 +22,17 @@ import type { Color } from 'antd/es/color-picker';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { NodeResizer, useViewport } from 'reactflow';
 import { useMutationGate } from '../../../contexts/ConnectionContext';
+import { agorStore, shallow, useStoreWithEqualityFn } from '../../../store/agorStore';
+import { makeZoneMembersSelector, type ZoneMember } from '../../../store/selectors';
 import { getContrastingTextColor } from '../../../utils/theme';
 import { getUserInitials } from '../../UserIdentityAvatar';
 import { DeleteZoneModal } from './DeleteZoneModal';
 import { ZoneConfigModal } from './ZoneConfigModal';
+import {
+  ZONE_WORKTREE_DRAG_MIME,
+  type ZoneWorktreeDragPayload,
+  ZoneWorktreeList,
+} from './ZoneWorktreeList';
 import type { LayerOp } from './zOrder';
 import { toTranslucentZoneFill, ZONE_CONTENT_OPACITY } from './zoneAppearance';
 import { effectiveLabelFontSize, statusFontSizeFor } from './zoneFontSize';
@@ -50,12 +57,35 @@ const getColorPalette = (token: ReturnType<typeof theme.useToken>['token']) => [
 type ZoneBoardObject = Extract<BoardObject, { type: 'zone' }>;
 type BoardObjectUpdateResult = boolean | undefined | Promise<boolean | undefined>;
 
+/** Vertical space reserved above the worktree list (label + status + paddings),
+ *  subtracted from the zone height to size the virtual list. Approximate: the
+ *  flex parent clips, so an over-estimate just yields a shorter scroll area. */
+const ZONE_WORKTREE_LIST_CHROME = 96;
+/** Never collapse the list below this, even for a very short zone. */
+const ZONE_WORKTREE_MIN_LIST_HEIGHT = 84;
+
 /**
  * ZoneNode - Resizable rectangle for organizing sessions visually
  */
 interface ZoneNodeData extends Omit<ZoneBoardObject, 'type'> {
   objectId: string;
   pinnedItemCount?: number;
+  /** Board this zone belongs to; scopes the worktree-members subscription. */
+  boardId?: string;
+  /** Open a pinned worktree's full card in a modal (row click / row open action).
+   *  Separate from the settings path — the worktree stays pinned. */
+  onOpenWorktreeCard?: (branchId: string) => void;
+  /** Re-parent/detach a worktree by patching its board-object `zone_id`. */
+  onWorktreePatchZone?: (objectId: string, zoneId: string | null) => void | Promise<void>;
+  /** Detach a worktree AND reposition it to the given board coordinates in one
+   *  patch (used by the X-button so the freed card lands visibly, not behind
+   *  the zone). Position + `zone_id: null` go together. */
+  onWorktreeDetachAt?: (
+    objectId: string,
+    position: { x: number; y: number }
+  ) => void | Promise<void>;
+  /** Fire this zone's trigger after a worktree row is dropped in (cross-zone move). */
+  onWorktreeZoneTrigger?: (branchId: string, zoneId: string) => void;
   onUpdate?: (objectId: string, objectData: BoardObject) => BoardObjectUpdateResult;
   onDelete?: (objectId: string, deleteAssociatedSessions: boolean) => void;
   onReorder?: (objectId: string, op: LayerOp) => void;
@@ -110,6 +140,84 @@ const ZoneNodeComponent = ({ data, selected }: { data: ZoneNodeData; selected?: 
   // isolated fixtures backwards compatible.
   const mutationGate = useMutationGate();
   const mutationDisabled = !mutationGate.canMutate || data.canEdit === false;
+
+  // Worktrees pinned to this zone, resolved + name-sorted. The list is already
+  // viewer-filtered server-side (RBAC), so both the rows and the count badge
+  // reflect only what the viewer may see. Subscribe with `shallow` so unrelated
+  // board patches don't re-render the zone; membership/identity changes do.
+  const zoneMembersSelector = useMemo(
+    () => makeZoneMembersSelector(data.boardId, data.objectId),
+    [data.boardId, data.objectId]
+  );
+  const zoneMembers = useStoreWithEqualityFn(agorStore, zoneMembersSelector, shallow);
+  const [isDropTarget, setIsDropTarget] = useState(false);
+
+  const canPinWorktrees = !mutationDisabled && !!data.onWorktreePatchZone;
+
+  // Drag-out detach: the gesture already dropped the card somewhere, so only
+  // clear `zone_id` and keep the stored position.
+  const handleWorktreeDetach = React.useCallback(
+    (member: ZoneMember) => {
+      if (mutationDisabled) return;
+      data.onWorktreePatchZone?.(member.objectId, null);
+    },
+    [data.onWorktreePatchZone, mutationDisabled]
+  );
+
+  // X-button detach: a single click with no drop position. Clear `zone_id` AND
+  // place the freed card just below the zone so it lands visibly instead of
+  // reappearing behind the zone at its stale (zone top-left) position. Zone
+  // geometry comes from this node's own data.
+  const handleWorktreeRemove = React.useCallback(
+    (member: ZoneMember) => {
+      if (mutationDisabled) return;
+      const position = { x: data.x, y: data.y + data.height + 24 };
+      if (data.onWorktreeDetachAt) {
+        data.onWorktreeDetachAt(member.objectId, position);
+      } else {
+        // Fallback: at least detach even if the reposition path is unavailable.
+        data.onWorktreePatchZone?.(member.objectId, null);
+      }
+    },
+    [
+      data.onWorktreeDetachAt,
+      data.onWorktreePatchZone,
+      data.x,
+      data.y,
+      data.height,
+      mutationDisabled,
+    ]
+  );
+
+  const handleWorktreeDrop = (event: React.DragEvent<HTMLDivElement>) => {
+    if (!event.dataTransfer.types.includes(ZONE_WORKTREE_DRAG_MIME)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    setIsDropTarget(false);
+    if (!canPinWorktrees) return;
+    let payload: ZoneWorktreeDragPayload;
+    try {
+      payload = JSON.parse(event.dataTransfer.getData(ZONE_WORKTREE_DRAG_MIME));
+    } catch {
+      return;
+    }
+    // Same-zone drop is a no-op (no reorder in v1).
+    if (payload.sourceZoneId === data.objectId) return;
+    data.onWorktreePatchZone?.(payload.objectId, data.objectId);
+    // Fire the zone's trigger on the move, matching the card-drag path. Without
+    // this, a zone→zone row move re-parents but never triggers (the bug: only a
+    // drop from the free canvas, which uses the card path, was firing it).
+    data.onWorktreeZoneTrigger?.(payload.branchId, data.objectId);
+  };
+
+  const handleWorktreeDragOver = (event: React.DragEvent<HTMLDivElement>) => {
+    if (!event.dataTransfer.types.includes(ZONE_WORKTREE_DRAG_MIME)) return;
+    // Signal a valid drop so the browser reports dropEffect 'move' (and the
+    // source row does NOT treat the drag as a drag-out-to-canvas detach).
+    event.preventDefault();
+    event.dataTransfer.dropEffect = canPinWorktrees ? 'move' : 'none';
+    if (canPinWorktrees && !isDropTarget) setIsDropTarget(true);
+  };
 
   // Inverse scale to keep toolbar at constant size regardless of zoom
   const scale = 1 / zoom;
@@ -628,6 +736,64 @@ const ZoneNodeComponent = ({ data, selected }: { data: ZoneNodeData; selected?: 
             {data.status}
           </div>
         )}
+        {/* Worktree list / drop zone. Fills the remaining zone height so the
+            list scrolls within the fixed zone (the zone never auto-grows). The
+            frame itself has pointerEvents:none; this content area re-enables
+            them so rows are interactive and the zone can accept a row drop. */}
+        <div
+          onDragOver={handleWorktreeDragOver}
+          onDragEnter={handleWorktreeDragOver}
+          onDragLeave={() => setIsDropTarget(false)}
+          onDrop={handleWorktreeDrop}
+          style={{
+            flex: 1,
+            minHeight: 0,
+            marginTop: token.marginXS,
+            display: 'flex',
+            flexDirection: 'column',
+            pointerEvents: 'auto',
+            borderRadius: token.borderRadiusSM,
+            outline: isDropTarget ? `2px dashed ${borderColor}` : 'none',
+            outlineOffset: -2,
+          }}
+        >
+          {zoneMembers.length > 0 ? (
+            <ZoneWorktreeList
+              members={zoneMembers}
+              zoneId={data.objectId}
+              // Content area fills the flex slot; give the virtual list the zone
+              // body height minus reserved label/status/padding. The flex parent
+              // clips overflow, so an over-estimate simply scrolls.
+              height={Math.max(
+                ZONE_WORKTREE_MIN_LIST_HEIGHT,
+                data.height - ZONE_WORKTREE_LIST_CHROME
+              )}
+              canEdit={canPinWorktrees}
+              textColor={textColor}
+              onOpenWorktreeCard={data.onOpenWorktreeCard}
+              onDetachWorktree={handleWorktreeDetach}
+              onRemoveFromZone={handleWorktreeRemove}
+            />
+          ) : (
+            <Flex
+              align="center"
+              justify="center"
+              style={{
+                flex: 1,
+                minHeight: 0,
+                textAlign: 'center',
+                color: textColor,
+                opacity: 0.6,
+                fontSize: token.fontSizeSM,
+                padding: token.padding,
+              }}
+            >
+              <Typography.Text style={{ color: textColor, opacity: 0.85 }}>
+                Drag a worktree here
+              </Typography.Text>
+            </Flex>
+          )}
+        </div>
       </div>
       {configModalOpen && (
         <ZoneConfigModal
