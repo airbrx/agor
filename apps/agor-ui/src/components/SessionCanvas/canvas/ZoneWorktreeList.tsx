@@ -63,6 +63,10 @@ interface ZoneWorktreeRowProps {
   member: ZoneMember;
   sourceZoneId: string;
   canEdit: boolean;
+  /** Contrasting text color for the zone's background (from getContrastingTextColor).
+   *  Row text/icons must use this, not theme tokens, or they vanish on a dark or
+   *  strongly-colored zone. Status dot stays semantic (running/failed). */
+  textColor: string;
   onOpenWorktree?: (branchId: string) => void;
   onRemoveFromZone?: (member: ZoneMember) => void;
 }
@@ -71,6 +75,7 @@ const ZoneWorktreeRowComponent: React.FC<ZoneWorktreeRowProps> = ({
   member,
   sourceZoneId,
   canEdit,
+  textColor,
   onOpenWorktree,
   onRemoveFromZone,
 }) => {
@@ -172,10 +177,12 @@ const ZoneWorktreeRowComponent: React.FC<ZoneWorktreeRowProps> = ({
           }}
         />
       </Tooltip>
-      <BranchesOutlined style={{ flex: '0 0 auto', color: token.colorTextSecondary }} />
+      <BranchesOutlined style={{ flex: '0 0 auto', color: textColor, opacity: 0.7 }} />
       <Typography.Text
         ellipsis={{ tooltip: member.branch.name }}
-        style={{ flex: 1, minWidth: 0, fontSize: token.fontSizeSM }}
+        // Contrast against the zone background, not the theme; ellipsis tooltip
+        // still shows the full name.
+        style={{ flex: 1, minWidth: 0, fontSize: token.fontSizeSM, color: textColor }}
       >
         {member.branch.name}
       </Typography.Text>
@@ -190,6 +197,7 @@ const ZoneWorktreeRowComponent: React.FC<ZoneWorktreeRowProps> = ({
             <Button
               type="text"
               size="small"
+              style={{ color: textColor }}
               icon={<ExportOutlined />}
               aria-label={`Open worktree ${member.branch.name}`}
               onClick={(event) => {
@@ -203,6 +211,7 @@ const ZoneWorktreeRowComponent: React.FC<ZoneWorktreeRowProps> = ({
               <Button
                 type="text"
                 size="small"
+                style={{ color: textColor }}
                 icon={<CloseOutlined />}
                 aria-label={`Remove ${member.branch.name} from zone`}
                 onClick={(event) => {
@@ -226,6 +235,8 @@ export interface ZoneWorktreeListProps {
   /** Available height (px) for the list body inside the fixed-height zone. */
   height: number;
   canEdit: boolean;
+  /** Contrasting text color for the zone background; applied to every row. */
+  textColor: string;
   onOpenWorktree?: (branchId: string) => void;
   /** Clear a member's `zone_id` (remove-from-zone and drag-out share this path). */
   onDetachWorktree?: (member: ZoneMember) => void;
@@ -246,6 +257,7 @@ export const ZoneWorktreeList: React.FC<ZoneWorktreeListProps> = ({
   zoneId,
   height,
   canEdit,
+  textColor,
   onOpenWorktree,
   onDetachWorktree,
 }) => {
@@ -288,6 +300,7 @@ export const ZoneWorktreeList: React.FC<ZoneWorktreeListProps> = ({
               member={member}
               sourceZoneId={zoneId}
               canEdit={canEdit}
+              textColor={textColor}
               onOpenWorktree={onOpenWorktree}
               onRemoveFromZone={onDetachWorktree}
             />

@@ -28,6 +28,9 @@ interface UseBoardObjectsProps {
   onEditMarkdown?: (objectId: string, content: string, width: number) => void;
   /** Open a pinned worktree in its drawer (row click / row "open" action). */
   onOpenBranch?: (branchId: string) => void;
+  /** Fire a zone's trigger after a worktree ROW is dropped into it (cross-zone
+   *  move via the zone list). The card-drag path handles this itself. */
+  onWorktreeZoneTrigger?: (branchId: string, zoneId: string) => void;
   /** Effective board.edit permission, resolved by the canvas. */
   canEdit?: boolean;
 }
@@ -49,6 +52,7 @@ export const useBoardObjects = ({
   activeUrlTargetArtifactId,
   onEditMarkdown,
   onOpenBranch,
+  onWorktreeZoneTrigger,
   canEdit = true,
 }: UseBoardObjectsProps) => {
   // Use ref to avoid recreating callbacks when board changes
@@ -441,6 +445,7 @@ export const useBoardObjects = ({
             boardId: boardRef.current?.board_id,
             onOpenWorktree: onOpenBranch,
             onWorktreePatchZone: patchWorktreeZone,
+            onWorktreeZoneTrigger,
             overlappingZoneCount:
               objectData.type === 'zone'
                 ? zoneEntries.filter(
@@ -473,6 +478,7 @@ export const useBoardObjects = ({
     reorderObject,
     patchWorktreeZone,
     onOpenBranch,
+    onWorktreeZoneTrigger,
     eraserMode,
     activeUrlTargetArtifactId,
     onEditMarkdown,
