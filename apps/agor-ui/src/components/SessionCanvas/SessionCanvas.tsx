@@ -3364,13 +3364,27 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
           />
         )}
 
-        {/* Worktree Card Modal — opened from a zone's compact worktree row.
-            The worktree stays pinned; this surfaces its full BranchCard. */}
+        {/* Worktree Card overlay — opened from a zone's compact worktree row.
+            The worktree stays pinned; this surfaces its full BranchCard.
+            The card IS the surface: antd Modal is used only as the backdrop +
+            portal + Esc/focus-trap. All modal chrome is stripped (transparent
+            content, no shadow, no padding, no close X) so there's no frame
+            around the card and no white halo. Close via backdrop click or Esc. */}
         <Modal
           open={!!openWorktreeModalBranchId}
           onCancel={() => setOpenWorktreeModalBranchId(null)}
           footer={null}
-          width={680}
+          closable={false}
+          centered
+          // BranchCard sets its OWN width (500 base, ~880 when a session peek is
+          // open); fit-content lets the backdrop-only shell hug the card at either.
+          width="fit-content"
+          // antd v6 semantic key for the panel (was `content` in v5) is `container`;
+          // strip its bg/shadow/padding so the card itself is the only surface.
+          styles={{
+            container: { padding: 0, background: 'transparent', boxShadow: 'none' },
+            body: { padding: 0, overflow: 'visible' },
+          }}
           destroyOnClose
         >
           {(() => {
