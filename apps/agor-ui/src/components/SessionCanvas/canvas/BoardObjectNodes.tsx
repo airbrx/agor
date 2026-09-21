@@ -72,10 +72,18 @@ interface ZoneNodeData extends Omit<ZoneBoardObject, 'type'> {
   pinnedItemCount?: number;
   /** Board this zone belongs to; scopes the worktree-members subscription. */
   boardId?: string;
-  /** Open a pinned worktree in its drawer (row click / row open action). */
-  onOpenWorktree?: (branchId: string) => void;
+  /** Open a pinned worktree's full card in a modal (row click / row open action).
+   *  Separate from the settings path — the worktree stays pinned. */
+  onOpenWorktreeCard?: (branchId: string) => void;
   /** Re-parent/detach a worktree by patching its board-object `zone_id`. */
   onWorktreePatchZone?: (objectId: string, zoneId: string | null) => void | Promise<void>;
+  /** Detach a worktree AND reposition it to the given board coordinates in one
+   *  patch (used by the X-button so the freed card lands visibly, not behind
+   *  the zone). Position + `zone_id: null` go together. */
+  onWorktreeDetachAt?: (
+    objectId: string,
+    position: { x: number; y: number }
+  ) => void | Promise<void>;
   /** Fire this zone's trigger after a worktree row is dropped in (cross-zone move). */
   onWorktreeZoneTrigger?: (branchId: string, zoneId: string) => void;
   onUpdate?: (objectId: string, objectData: BoardObject) => BoardObjectUpdateResult;
@@ -146,12 +154,39 @@ const ZoneNodeComponent = ({ data, selected }: { data: ZoneNodeData; selected?: 
 
   const canPinWorktrees = !mutationDisabled && !!data.onWorktreePatchZone;
 
+  // Drag-out detach: the gesture already dropped the card somewhere, so only
+  // clear `zone_id` and keep the stored position.
   const handleWorktreeDetach = React.useCallback(
     (member: ZoneMember) => {
       if (mutationDisabled) return;
       data.onWorktreePatchZone?.(member.objectId, null);
     },
     [data.onWorktreePatchZone, mutationDisabled]
+  );
+
+  // X-button detach: a single click with no drop position. Clear `zone_id` AND
+  // place the freed card just below the zone so it lands visibly instead of
+  // reappearing behind the zone at its stale (zone top-left) position. Zone
+  // geometry comes from this node's own data.
+  const handleWorktreeRemove = React.useCallback(
+    (member: ZoneMember) => {
+      if (mutationDisabled) return;
+      const position = { x: data.x, y: data.y + data.height + 24 };
+      if (data.onWorktreeDetachAt) {
+        data.onWorktreeDetachAt(member.objectId, position);
+      } else {
+        // Fallback: at least detach even if the reposition path is unavailable.
+        data.onWorktreePatchZone?.(member.objectId, null);
+      }
+    },
+    [
+      data.onWorktreeDetachAt,
+      data.onWorktreePatchZone,
+      data.x,
+      data.y,
+      data.height,
+      mutationDisabled,
+    ]
   );
 
   const handleWorktreeDrop = (event: React.DragEvent<HTMLDivElement>) => {
@@ -735,8 +770,9 @@ const ZoneNodeComponent = ({ data, selected }: { data: ZoneNodeData; selected?: 
               )}
               canEdit={canPinWorktrees}
               textColor={textColor}
-              onOpenWorktree={data.onOpenWorktree}
+              onOpenWorktreeCard={data.onOpenWorktreeCard}
               onDetachWorktree={handleWorktreeDetach}
+              onRemoveFromZone={handleWorktreeRemove}
             />
           ) : (
             <Flex
