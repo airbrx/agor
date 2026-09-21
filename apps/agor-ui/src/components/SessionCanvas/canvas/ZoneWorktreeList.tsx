@@ -13,9 +13,10 @@
  *    (`board-objects.patch({ zone_id })`). Same-zone drop is a no-op.
  *  - Drag a row out and drop on empty canvas → `dragend` with no successful drop
  *    clears `zone_id` (worktree returns to the canvas as a full card).
- *  - Click a row → open the worktree in its drawer (`onOpenWorktree`), because a
- *    pinned worktree has no on-canvas card to focus.
- *  - "Remove from zone" hover action → clear `zone_id` (same end state as drag-out).
+ *  - Click a row → open the worktree's full card in a modal (`onOpenWorktreeCard`);
+ *    the worktree stays pinned (this is NOT the settings drawer).
+ *  - "Remove from zone" hover action (X) → confirm, then clear `zone_id` AND
+ *    reposition the freed card just below the zone so it lands visibly.
  *
  * Rows subscribe to their own branch's session slice for the count badge and the
  * latest-status dot, mirroring the existing per-branch subscription BranchNode
@@ -25,7 +26,7 @@
 import type { Session } from '@agor-live/client';
 import { isSessionExecuting, SessionStatus } from '@agor-live/client';
 import { BranchesOutlined, CloseOutlined, ExportOutlined } from '@ant-design/icons';
-import { Badge, Button, Tooltip, Typography, theme } from 'antd';
+import { Badge, Button, Modal, Tooltip, Typography, theme } from 'antd';
 import React, { useMemo, useState } from 'react';
 import { useAgorStore } from '../../../store/agorStore';
 import { makeSessionsForBranchSelector, type ZoneMember } from '../../../store/selectors';
@@ -67,7 +68,15 @@ interface ZoneWorktreeRowProps {
    *  Row text/icons must use this, not theme tokens, or they vanish on a dark or
    *  strongly-colored zone. Status dot stays semantic (running/failed). */
   textColor: string;
-  onOpenWorktree?: (branchId: string) => void;
+  /** Open the worktree's full card in a modal (row click + row "open" button).
+   *  This intentionally does NOT open branch settings — the worktree stays
+   *  pinned in the zone; the modal just surfaces its full card. */
+  onOpenWorktreeCard?: (branchId: string) => void;
+  /** Drag-out detach: the gesture already produced a real drop position, so this
+   *  path only clears `zone_id` (no confirm, no reposition). */
+  onDetachWorktree?: (member: ZoneMember) => void;
+  /** X-button detach: a single click with no drop position, so this path
+   *  repositions the freed card just below the zone (confirm handled here). */
   onRemoveFromZone?: (member: ZoneMember) => void;
 }
 
@@ -76,7 +85,8 @@ const ZoneWorktreeRowComponent: React.FC<ZoneWorktreeRowProps> = ({
   sourceZoneId,
   canEdit,
   textColor,
-  onOpenWorktree,
+  onOpenWorktreeCard,
+  onDetachWorktree,
   onRemoveFromZone,
 }) => {
   const { token } = theme.useToken();
@@ -123,7 +133,7 @@ const ZoneWorktreeRowComponent: React.FC<ZoneWorktreeRowProps> = ({
     // returns to the canvas as a full card. A successful drop on another zone
     // sets dropEffect 'move' and is handled by that zone's onDrop instead.
     if (event.dataTransfer.dropEffect === 'none') {
-      onRemoveFromZone?.(member);
+      onDetachWorktree?.(member);
     }
   };
 
@@ -143,12 +153,12 @@ const ZoneWorktreeRowComponent: React.FC<ZoneWorktreeRowProps> = ({
       onMouseLeave={() => setHovered(false)}
       onClick={(event) => {
         event.stopPropagation();
-        onOpenWorktree?.(member.branchId);
+        onOpenWorktreeCard?.(member.branchId);
       }}
       onKeyDown={(event) => {
         if (event.key === 'Enter' || event.key === ' ') {
           event.preventDefault();
-          onOpenWorktree?.(member.branchId);
+          onOpenWorktreeCard?.(member.branchId);
         }
       }}
       aria-label={`Open worktree ${member.branch.name}; ${activeSessions.length} sessions; ${statusLabel}`}
@@ -202,7 +212,7 @@ const ZoneWorktreeRowComponent: React.FC<ZoneWorktreeRowProps> = ({
               aria-label={`Open worktree ${member.branch.name}`}
               onClick={(event) => {
                 event.stopPropagation();
-                onOpenWorktree?.(member.branchId);
+                onOpenWorktreeCard?.(member.branchId);
               }}
             />
           </Tooltip>
@@ -216,7 +226,16 @@ const ZoneWorktreeRowComponent: React.FC<ZoneWorktreeRowProps> = ({
                 aria-label={`Remove ${member.branch.name} from zone`}
                 onClick={(event) => {
                   event.stopPropagation();
-                  onRemoveFromZone?.(member);
+                  // Confirm before detaching: unlike the drag-out gesture (which
+                  // has an explicit drop position), the X button is a single
+                  // click, so guard it and let the detach handler reposition the
+                  // freed card below the zone.
+                  Modal.confirm({
+                    title: `Remove ${member.branch.name} from zone?`,
+                    content: 'It will return to the board as a card.',
+                    okText: 'Remove',
+                    onOk: () => onRemoveFromZone?.(member),
+                  });
                 }}
               />
             </Tooltip>
@@ -237,9 +256,13 @@ export interface ZoneWorktreeListProps {
   canEdit: boolean;
   /** Contrasting text color for the zone background; applied to every row. */
   textColor: string;
-  onOpenWorktree?: (branchId: string) => void;
-  /** Clear a member's `zone_id` (remove-from-zone and drag-out share this path). */
+  /** Open a member's full card in a modal (row click / row "open" button). */
+  onOpenWorktreeCard?: (branchId: string) => void;
+  /** Drag-out detach: clear a member's `zone_id`, keeping its stored position. */
   onDetachWorktree?: (member: ZoneMember) => void;
+  /** X-button detach: clear `zone_id` AND reposition the freed card below the
+   *  zone so it lands visibly instead of behind the zone. */
+  onRemoveFromZone?: (member: ZoneMember) => void;
 }
 
 /** Extra rows rendered above/below the viewport to smooth fast scrolls. */
@@ -258,8 +281,9 @@ export const ZoneWorktreeList: React.FC<ZoneWorktreeListProps> = ({
   height,
   canEdit,
   textColor,
-  onOpenWorktree,
+  onOpenWorktreeCard,
   onDetachWorktree,
+  onRemoveFromZone,
 }) => {
   const viewportHeight = Math.max(ZONE_WORKTREE_ROW_HEIGHT, height);
   const [scrollTop, setScrollTop] = useState(0);
@@ -301,8 +325,9 @@ export const ZoneWorktreeList: React.FC<ZoneWorktreeListProps> = ({
               sourceZoneId={zoneId}
               canEdit={canEdit}
               textColor={textColor}
-              onOpenWorktree={onOpenWorktree}
-              onRemoveFromZone={onDetachWorktree}
+              onOpenWorktreeCard={onOpenWorktreeCard}
+              onDetachWorktree={onDetachWorktree}
+              onRemoveFromZone={onRemoveFromZone}
             />
           ))}
         </div>

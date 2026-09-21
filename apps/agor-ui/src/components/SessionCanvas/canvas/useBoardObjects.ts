@@ -46,8 +46,9 @@ interface UseBoardObjectsProps {
    * store's board (and again after the reconnect, when the reply was lost).
    */
   onWriteFailed?: (error: unknown) => void;
-  /** Open a pinned worktree in its drawer (row click / row "open" action). */
-  onOpenBranch?: (branchId: string) => void;
+  /** Open a pinned worktree's full card in a modal (row click / row "open").
+   *  The worktree stays pinned — this is NOT the branch settings drawer. */
+  onOpenWorktreeCard?: (branchId: string) => void;
   /** Fire a zone's trigger after a worktree ROW is dropped into it (cross-zone
    *  move via the zone list). The card-drag path handles this itself. */
   onWorktreeZoneTrigger?: (branchId: string, zoneId: string) => void;
@@ -78,7 +79,7 @@ export const useBoardObjects = ({
   onZoneDraftLost,
   guard,
   onWriteFailed,
-  onOpenBranch,
+  onOpenWorktreeCard,
   onWorktreeZoneTrigger,
 }: UseBoardObjectsProps) => {
   // Use ref to avoid recreating callbacks when board changes
@@ -225,6 +226,27 @@ export const useBoardObjects = ({
         await client.service('board-objects').patch(objectId, { zone_id: zoneId });
       } catch (error) {
         console.error('Failed to move worktree between zones:', error);
+        showError('Failed to move worktree');
+      }
+    },
+    [client, showError]
+  );
+
+  /**
+   * Detach a pinned worktree (clear `zone_id`) AND move it to an explicit board
+   * position in a single PATCH. Used by the zone list's X-button, which has no
+   * drop position of its own: without a new position the freed worktree would
+   * reappear at its stored placement (the zone's top-left) and sit behind the
+   * zone. The `board-objects` PATCH accepts position + `zone_id` together, the
+   * same as the node-drag drop path, so this is one round-trip.
+   */
+  const patchWorktreeDetachAt = useCallback(
+    async (objectId: string, position: { x: number; y: number }) => {
+      if (!canEditRef.current || !canMutateRef.current || !client) return;
+      try {
+        await client.service('board-objects').patch(objectId, { position, zone_id: null });
+      } catch (error) {
+        console.error('Failed to remove worktree from zone:', error);
         showError('Failed to move worktree');
       }
     },
@@ -501,8 +523,9 @@ export const useBoardObjects = ({
           pinnedItemCount,
           canEdit,
           boardId: boardRef.current?.board_id,
-          onOpenWorktree: onOpenBranch,
+          onOpenWorktreeCard,
           onWorktreePatchZone: patchWorktreeZone,
+          onWorktreeDetachAt: patchWorktreeDetachAt,
           onWorktreeZoneTrigger,
           overlappingZoneCount:
             objectData.type === 'zone'
@@ -537,7 +560,8 @@ export const useBoardObjects = ({
       deleteArtifact,
       reorderObject,
       patchWorktreeZone,
-      onOpenBranch,
+      patchWorktreeDetachAt,
+      onOpenWorktreeCard,
       onWorktreeZoneTrigger,
       eraserMode,
       activeUrlTargetArtifactId,
@@ -688,6 +712,7 @@ export const useBoardObjects = ({
     deleteZone,
     reorderObject,
     patchWorktreeZone,
+    patchWorktreeDetachAt,
     batchUpdateObjectPositions,
   };
 };
