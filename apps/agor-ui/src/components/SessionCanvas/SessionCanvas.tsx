@@ -790,6 +790,41 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       [canMutateBoard]
     );
 
+    // Fire a zone's trigger when a worktree ROW is dropped into it (the zone-list
+    // cross-zone move). The card-drag path (handleNodeDragStop) already does this;
+    // the row-drag path patches zone_id directly, so without this it would move the
+    // worktree but never trigger. Mirrors the card path: always_new fires the
+    // server trigger; show_picker opens the branch trigger modal. Caller guarantees
+    // this only runs on an actual zone change (same-zone drop is a no-op upstream).
+    const handleWorktreeZoneTrigger = useCallback(
+      (branchId: string, zoneId: string) => {
+        if (!client) return;
+        const zoneObj = board?.objects?.[zoneId];
+        if (zoneObj?.type !== 'zone') return;
+        const trigger = zoneObj.trigger;
+        if (!trigger) return;
+        if (trigger.behavior === 'always_new') {
+          (async () => {
+            try {
+              await client.service(`branches/${branchId}/fire-zone-trigger`).create({ zoneId });
+            } catch (error) {
+              console.error('❌ Failed to execute always_new trigger (row drop):', error);
+            }
+          })();
+        } else {
+          setBranchTriggerModal({
+            actionId: ++nextBranchTriggerActionIdRef.current,
+            branchId: branchId as BranchID,
+            zoneName: zoneObj.label,
+            zoneId,
+            trigger,
+            sessions: agorStore.getState().sessionsByBranch.get(branchId) ?? EMPTY_SESSIONS,
+          });
+        }
+      },
+      [client, board]
+    );
+
     // Board objects hook
     const { getBoardObjectNodes, batchUpdateObjectPositions, deleteObject } = useBoardObjects({
       board,
@@ -801,6 +836,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       activeUrlTargetArtifactId,
       onEditMarkdown: handleEditMarkdownNote,
       onOpenBranch,
+      onWorktreeZoneTrigger: handleWorktreeZoneTrigger,
       canEdit: canEditBoard,
     });
 
