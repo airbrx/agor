@@ -48,12 +48,16 @@ interface UseBoardObjectsProps {
   onWriteFailed?: (error: unknown) => void;
   /** Open a pinned worktree in its drawer (row click / row "open" action). */
   onOpenBranch?: (branchId: string) => void;
+  /** Fire a zone's trigger after a worktree ROW is dropped into it (cross-zone
+   *  move via the zone list). The card-drag path handles this itself. */
+  onWorktreeZoneTrigger?: (branchId: string, zoneId: string) => void;
 }
 
 type ZoneEntry = [string, Extract<BoardObject, { type: 'zone' }>];
 
 function zoneEntriesOf(objects: Record<string, BoardObject>): ZoneEntry[] {
   return Object.entries(objects).filter((entry): entry is ZoneEntry => entry[1].type === 'zone');
+}
 
 function zonesOverlap(
   a: Extract<BoardObject, { type: 'zone' }>,
@@ -75,6 +79,7 @@ export const useBoardObjects = ({
   guard,
   onWriteFailed,
   onOpenBranch,
+  onWorktreeZoneTrigger,
 }: UseBoardObjectsProps) => {
   // Use ref to avoid recreating callbacks when board changes
   const boardRef = useRef(board);
@@ -498,6 +503,7 @@ export const useBoardObjects = ({
           boardId: boardRef.current?.board_id,
           onOpenWorktree: onOpenBranch,
           onWorktreePatchZone: patchWorktreeZone,
+          onWorktreeZoneTrigger,
           overlappingZoneCount:
             objectData.type === 'zone'
               ? zoneEntries.filter(
@@ -532,6 +538,7 @@ export const useBoardObjects = ({
       reorderObject,
       patchWorktreeZone,
       onOpenBranch,
+      onWorktreeZoneTrigger,
       eraserMode,
       activeUrlTargetArtifactId,
       onEditMarkdown,

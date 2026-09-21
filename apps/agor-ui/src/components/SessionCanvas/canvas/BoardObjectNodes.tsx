@@ -89,6 +89,8 @@ interface ZoneNodeData extends Omit<ZoneBoardObject, 'type'> {
   onOpenWorktree?: (branchId: string) => void;
   /** Re-parent/detach a worktree by patching its board-object `zone_id`. */
   onWorktreePatchZone?: (objectId: string, zoneId: string | null) => void | Promise<void>;
+  /** Fire this zone's trigger after a worktree row is dropped in (cross-zone move). */
+  onWorktreeZoneTrigger?: (branchId: string, zoneId: string) => void;
   /**
    * `ticket`: captured when the edit began (an immediate action captures it
    * as it runs). `null` — nothing could be captured — is refused.
@@ -241,6 +243,10 @@ const ZoneNodeComponent = ({ data, selected }: { data: ZoneNodeData; selected?: 
     // Same-zone drop is a no-op (no reorder in v1).
     if (payload.sourceZoneId === data.objectId) return;
     data.onWorktreePatchZone?.(payload.objectId, data.objectId);
+    // Fire the zone's trigger on the move, matching the card-drag path. Without
+    // this, a zone→zone row move re-parents but never triggers (the bug: only a
+    // drop from the free canvas, which uses the card path, was firing it).
+    data.onWorktreeZoneTrigger?.(payload.branchId, data.objectId);
   };
 
   const handleWorktreeDragOver = (event: React.DragEvent<HTMLDivElement>) => {
@@ -877,6 +883,7 @@ const ZoneNodeComponent = ({ data, selected }: { data: ZoneNodeData; selected?: 
                 data.height - ZONE_WORKTREE_LIST_CHROME
               )}
               canEdit={canPinWorktrees}
+              textColor={textColor}
               onOpenWorktree={data.onOpenWorktree}
               onDetachWorktree={handleWorktreeDetach}
             />
