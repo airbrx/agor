@@ -3405,20 +3405,58 @@ export async function registerMCPServices(
           redirectUri: pendingFlow.context.redirectUri,
         }
       : pendingFlow.localGrantBinding;
-    const work = () =>
-      persistOAuthToken(
+    // The token row's client MUST be the exact client the grant was issued
+    // under, and for DCR that authority is the CURRENT registration row — not
+    // the flow-start snapshot carried on `context.clientId`. Re-resolve it from
+    // the durable registration by the exact epoch this attempt used so a
+    // superseded/rotated client can never be persisted as an unrefreshable
+    // grant (a persisted stale client replays forever as `invalid_client` in
+    // `refreshPostgres`). This runs under the grant-configuration lock that
+    // `persistAndFinish` already holds. If the exact registration is no longer
+    // current, fail closed: the grant is bound to a client the provider no
+    // longer recognizes and must be reconnected, not durably stored.
+    const resolveGrantClient = async (): Promise<{
+      clientId: string;
+      clientSecret?: string;
+    }> => {
+      const registrationId = pendingFlow.context.clientRegistrationId;
+      if (!durableOAuthClientRegistrations || !pendingFlow.tenantId || !registrationId) {
+        return {
+          clientId: pendingFlow.context.clientId,
+          ...(pendingFlow.context.clientSecret
+            ? { clientSecret: pendingFlow.context.clientSecret }
+            : {}),
+        };
+      }
+      const current = await durableOAuthClientRegistrations.openCurrentClientForAttempt({
+        tenantId: pendingFlow.tenantId,
+        serverId: pendingFlow.mcpServerId as MCPServerID,
+        registrationId,
+      });
+      if (!current) {
+        throw new Error(
+          'The MCP OAuth client registration changed before the grant was persisted. Restart OAuth.'
+        );
+      }
+      return current;
+    };
+
+    const work = async () => {
+      const grantClient = await resolveGrantClient();
+      await persistOAuthToken(
         db,
         tokenResponse,
         {
           ...pendingFlow,
-          clientId: pendingFlow.context.clientId,
-          clientSecret: pendingFlow.context.clientSecret,
+          clientId: grantClient.clientId,
+          clientSecret: grantClient.clientSecret,
           tokenEndpoint: pendingFlow.context.tokenEndpoint,
           resourceUri: pendingFlow.context.resourceUri,
           ...(grantBinding ? { grantBinding } : {}),
         },
         logPrefix
       );
+    };
 
     const persistAndFinish = async () => {
       // Recheck role and the complete server/config fingerprint inside the same
