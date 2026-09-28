@@ -343,6 +343,69 @@ export class MCPOAuthClientRegistrationAuthority {
   }
 
   /**
+   * Open the client the grant is actually issued under: the current DCR
+   * registration for this server, matched by the exact epoch a browser attempt
+   * resolved. This is the single source of truth for the token row's
+   * `oauth_client_id` — persisting anything else (e.g. a stale flow-start
+   * snapshot or a leftover configured client) makes every later refresh replay
+   * a client the provider no longer recognizes (`invalid_client`).
+   *
+   * Returns `null` when the exact registration is no longer current (a
+   * concurrent reset/supersede won the race). The caller must fail the flow
+   * closed rather than persist an unverifiable client.
+   */
+  async openCurrentClientForAttempt(input: {
+    tenantId: string;
+    serverId: MCPServerID;
+    registrationId: MCPOAuthClientRegistrationID;
+  }): Promise<{ clientId: string; clientSecret?: string } | null> {
+    return runWithTenantDatabaseScope(this.db, input.tenantId, async (scoped) => {
+      const record = await new MCPOAuthClientRegistrationRepository(scoped).getCurrent(
+        input.tenantId,
+        input.serverId
+      );
+      if (
+        !record ||
+        record.registrationId !== input.registrationId ||
+        record.status !== 'registered' ||
+        !record.isCurrent ||
+        !record.sealedMaterial ||
+        record.envelopeVersion !== BOUND_SECRET_ENVELOPE_VERSION
+      ) {
+        return null;
+      }
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(
+          openBoundSecret(
+            record.sealedMaterial,
+            this.masterSecret!,
+            'dcr-client',
+            registrationBinding(record)
+          )
+        );
+      } catch {
+        return null;
+      }
+      if (
+        !isMaterial(parsed) ||
+        parsed.tenantId !== record.tenantId ||
+        parsed.registrationId !== record.registrationId ||
+        parsed.mcpServerId !== record.mcpServerId ||
+        parsed.bindingVersion !== record.bindingVersion ||
+        parsed.bindingFingerprint !== record.bindingFingerprint ||
+        parsed.serverConfigVersion !== record.serverConfigVersion
+      ) {
+        return null;
+      }
+      return {
+        clientId: parsed.clientId,
+        ...(parsed.clientSecret ? { clientSecret: parsed.clientSecret } : {}),
+      };
+    });
+  }
+
+  /**
    * Lock and revalidate the exact DCR generation used by a browser attempt.
    *
    * The caller owns the grant-configuration lock and active tenant transaction
