@@ -45,9 +45,32 @@ export interface TenantContextScope {
   tenantId: TenantID | string;
 }
 
+// These AsyncLocalStorage stores hold tenant scope for the whole process and
+// MUST be true singletons. The daemon dynamically imports some modules (e.g.
+// tools/mcp/oauth-refresh), and the bundler can duplicate this module into a
+// separate chunk. A duplicated copy would create a SECOND AsyncLocalStorage,
+// so a scope entered through one copy is invisible to a proxy guard reading the
+// other — surfacing as spurious MissingTenantDatabaseScopeError. Anchoring the
+// instances on globalThis via a versioned Symbol.for key makes every duplicate
+// copy converge on one store regardless of how the bundler splits chunks.
+function getGlobalSingleton<T>(key: symbol, create: () => T): T {
+  const store = globalThis as Record<symbol, unknown>;
+  const existing = store[key] as T | undefined;
+  if (existing !== undefined) return existing;
+  const created = create();
+  store[key] = created;
+  return created;
+}
+
 /** Long-lived operation identity. This never owns a database transaction. */
-export const tenantContextScope = new AsyncLocalStorage<TenantContextScope>();
-export const tenantDatabaseScope = new AsyncLocalStorage<TenantDatabaseScope>();
+export const tenantContextScope = getGlobalSingleton(
+  Symbol.for('@agor/core/db:tenantContextScope'),
+  () => new AsyncLocalStorage<TenantContextScope>()
+);
+export const tenantDatabaseScope = getGlobalSingleton(
+  Symbol.for('@agor/core/db:tenantDatabaseScope'),
+  () => new AsyncLocalStorage<TenantDatabaseScope>()
+);
 
 export function getCurrentTenantDatabase(): Database | undefined {
   return tenantDatabaseScope.getStore()?.db;

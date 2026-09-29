@@ -32,7 +32,27 @@ import type {
 } from './client';
 import { isPostgresDatabase, runDatabaseTransaction } from './database-wrapper';
 
-const tenantScopedProxyTargets = new WeakMap<object, RawDatabase | Database>();
+// Must be a process-wide singleton for the same reason as the scope stores in
+// tenant-context: a bundler-duplicated copy of this module (the daemon
+// dynamically imports tools/mcp/oauth-refresh, which pulls in a second copy)
+// would get its own empty WeakMap. `unwrapTenantScopedDatabaseProxy` would then
+// always miss, hand back the guarded proxy instead of the raw handle, and the
+// scope-free `isPostgresDatabaseHandle` probe would trip the proxy guard —
+// MissingTenantDatabaseScopeError. Anchor on globalThis so every copy shares the
+// one registry that createTenantScopedDatabaseProxy populates.
+function getGlobalSingleton<T>(key: symbol, create: () => T): T {
+  const store = globalThis as Record<symbol, unknown>;
+  const existing = store[key] as T | undefined;
+  if (existing !== undefined) return existing;
+  const created = create();
+  store[key] = created;
+  return created;
+}
+
+const tenantScopedProxyTargets = getGlobalSingleton(
+  Symbol.for('@agor/core/db:tenantScopedProxyTargets'),
+  () => new WeakMap<object, RawDatabase | Database>()
+);
 
 export interface TenantScopedDatabaseProxyOptions {
   /**
