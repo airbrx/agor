@@ -6363,7 +6363,18 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
           ) {
             throw new BadRequest('mcpServerIds must contain non-empty strings');
           }
-          configuredMcpServerIds = [...new Set(data.mcpServerIds)] as MCPServerID[];
+          const deduped = [...new Set(data.mcpServerIds)] as MCPServerID[];
+          const existing = await inCurrentTenantDatabaseScope(() =>
+            new MCPServerRepository(db).findByIds(deduped)
+          );
+          const existingSet = new Set(existing.map((s) => s.mcp_server_id));
+          const staleIds = deduped.filter((sid) => !existingSet.has(sid));
+          if (staleIds.length > 0) {
+            console.warn(
+              `[Sessions] event=stale_mcp_ids_dropped_init session_id=${id} dropped=${staleIds.join(',')}`
+            );
+          }
+          configuredMcpServerIds = deduped.filter((sid) => existingSet.has(sid)) as MCPServerID[];
         }
 
         if (data.envVarNames !== undefined) {
