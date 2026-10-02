@@ -21,6 +21,7 @@ import {
   bindRepositoryToTenantUnitOfWork,
   EntityNotFoundError,
   getCurrentTenantId,
+  MCPServerRepository,
   runWithTenantDatabaseScope,
   runWithTenantDatabaseTransaction,
   SessionEnvSelectionRepository,
@@ -469,6 +470,24 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
     const explicitMcpServerIds = normalizeCreateMcpServerIds(
       (data as { mcpServerIds?: unknown }).mcpServerIds
     );
+    // Filter stale MCP server IDs before entering the create transaction.
+    // If a branch default references a server that was deleted, we drop the
+    // stale ID silently and async-heal the branch so future sessions succeed.
+    let resolvedMcpServerIds = explicitMcpServerIds;
+    if (explicitMcpServerIds && explicitMcpServerIds.length > 0) {
+      const existing = await new MCPServerRepository(this.db).findByIds(explicitMcpServerIds);
+      const existingSet = new Set(existing.map((s) => s.mcp_server_id));
+      const staleIds = explicitMcpServerIds.filter((id) => !existingSet.has(id));
+      if (staleIds.length > 0) {
+        console.warn(
+          `[Sessions] event=stale_mcp_ids_dropped branch_id=${String(data.branch_id ?? 'none')} dropped=${staleIds.join(',')}`
+        );
+        resolvedMcpServerIds = explicitMcpServerIds.filter((id) => existingSet.has(id));
+        if (data.branch_id) {
+          void this.pruneStaleMcpIdsFromBranch(String(data.branch_id), staleIds);
+        }
+      }
+    }
     const agenticTool = requireActiveAgenticTool(data.agentic_tool ?? 'claude-code');
     this.assertDeploymentToolConfigured(agenticTool);
     if (!(await isTenantAgenticToolEnabled(agenticTool, this.db))) {
@@ -605,10 +624,10 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
       });
 
       // Attach in-transaction: a bad server rolls the create back, not a silent drop (#2629).
-      if (explicitMcpServerIds && explicitMcpServerIds.length > 0) {
+      if (resolvedMcpServerIds && resolvedMcpServerIds.length > 0) {
         const mcpRepo = new SessionMCPServerRepository(scoped);
         try {
-          for (const serverId of explicitMcpServerIds) {
+          for (const serverId of resolvedMcpServerIds) {
             await mcpRepo.addServer(createdSession.session_id, serverId);
           }
         } catch (error) {
@@ -627,8 +646,8 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
     if (Array.isArray(created)) {
       throw new Error('Single-session creation returned multiple sessions');
     }
-    if (explicitMcpServerIds && explicitMcpServerIds.length > 0) {
-      for (const serverId of explicitMcpServerIds) {
+    if (resolvedMcpServerIds && resolvedMcpServerIds.length > 0) {
+      for (const serverId of resolvedMcpServerIds) {
         emitServiceEvent(this.app, {
           path: 'session-mcp-servers',
           event: 'created',
@@ -667,6 +686,24 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
     if (!branch) return;
 
     this.assertBranchFilesystemRecordUsable(branch);
+  }
+
+  private async pruneStaleMcpIdsFromBranch(branchId: string, staleIds: string[]): Promise<void> {
+    try {
+      const branch = await this.branchRepo.findById(branchId);
+      if (!branch?.mcp_server_ids?.length) return;
+      const staleSet = new Set(staleIds);
+      const pruned = branch.mcp_server_ids.filter((id) => !staleSet.has(id));
+      if (pruned.length === branch.mcp_server_ids.length) return;
+      await this.branchRepo.update(branchId, { mcp_server_ids: pruned });
+      console.warn(
+        `[Sessions] event=stale_mcp_ids_pruned branch_id=${branchId} removed=${staleIds.join(',')}`
+      );
+    } catch (err) {
+      console.warn(
+        `[Sessions] event=stale_mcp_ids_prune_failed branch_id=${branchId} err=${err instanceof Error ? err.message : String(err)}`
+      );
+    }
   }
 
   private assertBranchFilesystemRecordUsable(branch: Branch): void {

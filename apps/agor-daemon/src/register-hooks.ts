@@ -32,12 +32,14 @@ import {
   CapabilityPolicyRepository,
   CardRepository,
   getMCPEgressGatewayMode,
+  isPostgresDatabaseHandle,
   requireCurrentTenantId,
   runWithTenantDatabaseScope,
   ScheduleRepository,
   SessionMCPServerRepository,
   type SessionRepository,
   shortId,
+  sql,
   TaskRepository,
   type TenantScopeAwareDatabase,
   TenantWriteGateActiveError,
@@ -1307,6 +1309,52 @@ export function registerHooks(ctx: RegisterHooksContext): void {
       console.warn('[MCP Runtime] event=remove_target_capture_failed code=server_removed');
       return context;
     }
+  };
+
+  // After an MCP server is deleted, sweep branches and users to remove the dead
+  // ID from their default MCP server lists. Fire-and-forget: never blocks or
+  // fails the authoritative delete response.
+  const pruneDeletedMcpServerFromDefaults = async (context: HookContext): Promise<HookContext> => {
+    const serverId = (context.result as { mcp_server_id?: unknown } | undefined)?.mcp_server_id;
+    const tenantId = context.params.tenant?.tenant_id;
+    if (typeof serverId !== 'string' || !tenantId || !isPostgresDatabaseHandle(db)) return context;
+    void runWithTenantDatabaseScope(db, tenantId, async (scoped) => {
+      type ExecDB = { execute(q: unknown): Promise<unknown> };
+      const execDb = scoped as unknown as ExecDB;
+      await execDb.execute(
+        sql`UPDATE branches
+            SET data = jsonb_set(
+              data, '{mcp_server_ids}',
+              COALESCE(
+                (SELECT jsonb_agg(elem)
+                 FROM jsonb_array_elements_text(data->'mcp_server_ids') AS elem
+                 WHERE elem <> ${serverId}),
+                '[]'::jsonb
+              )
+            )
+            WHERE data->'mcp_server_ids' IS NOT NULL
+              AND data->'mcp_server_ids' @> jsonb_build_array(${serverId}::text)`
+      );
+      await execDb.execute(
+        sql`UPDATE users
+            SET data = jsonb_set(
+              data, '{default_mcp_server_ids}',
+              COALESCE(
+                (SELECT jsonb_agg(elem)
+                 FROM jsonb_array_elements_text(data->'default_mcp_server_ids') AS elem
+                 WHERE elem <> ${serverId}),
+                '[]'::jsonb
+              )
+            )
+            WHERE data->'default_mcp_server_ids' IS NOT NULL
+              AND data->'default_mcp_server_ids' @> jsonb_build_array(${serverId}::text)`
+      );
+    }).catch((err) => {
+      console.warn(
+        `[MCP] event=stale_id_prune_failed server_id=${serverId} err=${err instanceof Error ? err.message : String(err)}`
+      );
+    });
+    return context;
   };
 
   // Used by classifyMissingCredentialFailure to look up the acting user for
@@ -2598,7 +2646,11 @@ export function registerHooks(ctx: RegisterHooksContext): void {
       // `removed` payload broadcast to every authenticated connection in the
       // tenant. Without this it is the one method that hands out raw `env`,
       // `headers`, and `auth` — a delete is not an exemption from redaction.
-      remove: [abortMcpInFlightAfterWrite, redactMCPServerSecretFieldsForGatewayMode],
+      remove: [
+        abortMcpInFlightAfterWrite,
+        pruneDeletedMcpServerFromDefaults,
+        redactMCPServerSecretFieldsForGatewayMode,
+      ],
     },
   });
 
