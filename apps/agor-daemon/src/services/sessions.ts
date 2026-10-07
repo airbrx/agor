@@ -735,6 +735,10 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
         try {
           const serverId = await serverRepo.resolveCanonicalId(requestedId);
           canonicalIds.set(serverId, (canonicalIds.get(serverId) ?? 0) + 1);
+        } catch (error) {
+          handleMcpError(error, 1);
+        }
+      }
       // Lock in canonical order, in this same tenant transaction. A concurrent
       // delete either wins first (typed missing below) or waits for attachment.
       // SQLite's IMMEDIATE transaction already serializes writers. Do not catch
