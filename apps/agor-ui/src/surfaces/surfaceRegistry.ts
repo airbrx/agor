@@ -8,6 +8,7 @@ export type RouteSurfaceId =
   | 'mcp-connect'
   | 'cli-login'
   | 'artifact-fullscreen'
+  | 'new-session'
   | 'demo';
 
 export interface RouteSurfaceDefinition {
@@ -121,6 +122,18 @@ export const ARTIFACT_FULLSCREEN_SURFACE = defineSurface({
   branding: surfaceTitle('Artifact'),
 });
 
+export const NEW_SESSION_ROUTE_PATH = '/new' as const;
+
+export const NEW_SESSION_SURFACE = defineSurface({
+  id: 'new-session',
+  label: 'New session',
+  routePaths: [NEW_SESSION_ROUTE_PATH],
+  startsWorkspaceRuntime: false,
+  usesDeviceRouter: false,
+  usesSharedUserSettings: true,
+  branding: surfaceTitle('New session'),
+});
+
 export const RBAC_POLICY_PROTOTYPE_ROUTE_PATH = '/demo/rbac-policy' as const;
 
 /**
@@ -165,6 +178,7 @@ export const SURFACE_REGISTRY = [
   MCP_CONNECT_SURFACE,
   CLI_LOGIN_SURFACE,
   ARTIFACT_FULLSCREEN_SURFACE,
+  NEW_SESSION_SURFACE,
   DEMO_SURFACE,
   WORKSPACE_SURFACE,
 ] as const;
