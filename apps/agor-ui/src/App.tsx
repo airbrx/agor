@@ -92,6 +92,7 @@ import {
   ARTIFACT_FULLSCREEN_ROUTE_PATHS,
   KNOWLEDGE_ROUTE_PATHS,
   MCP_RECOVERY_ROUTE_PATHS,
+  NEW_SESSION_ROUTE_PATH,
   RBAC_POLICY_PROTOTYPE_ROUTE_PATH,
 } from './surfaces/surfaceRegistry';
 import { useWorkspaceSurfaceLifecycle } from './surfaces/useWorkspaceSurfaceLifecycle';
@@ -213,6 +214,11 @@ const loadArtifactFullscreenPage = cacheRouteLoader(
   () => import('./pages/ArtifactFullscreenPage'),
   (module) => ({ default: module.ArtifactFullscreenPage })
 );
+const loadNewSessionPage = cacheRouteLoader(
+  'new-session',
+  () => import('./pages/NewSessionPage'),
+  (module) => ({ default: module.NewSessionPage })
+);
 const loadMcpRecoveryPage = cacheRouteLoader(
   'mcp-recovery',
   () => import('./pages/MCPSlackRecoveryPage'),
@@ -249,6 +255,7 @@ const RbacPolicyPrototypePage = import.meta.env.DEV
 const AgorApp = lazy(loadAgorApp);
 const KnowledgePage = lazy(loadKnowledgePage);
 const ArtifactFullscreenPage = lazy(loadArtifactFullscreenPage);
+const NewSessionPage = lazy(loadNewSessionPage);
 const MCPSlackRecoveryPage = lazy(loadMcpRecoveryPage);
 const MobileApp = lazy(loadMobileApp);
 const StreamdownDemoPage = lazy(loadStreamdownDemoPage);
@@ -257,6 +264,7 @@ const routeModuleLoaders = {
   workspace: loadAgorApp,
   knowledge: loadKnowledgePage,
   'artifact-fullscreen': loadArtifactFullscreenPage,
+  'new-session': loadNewSessionPage,
   'mcp-recovery': loadMcpRecoveryPage,
   demo: loadStreamdownDemoPage,
   mobile: loadMobileApp,
@@ -2071,6 +2079,10 @@ function AppContent() {
     />
   );
 
+  const newSessionElement = (
+    <NewSessionPage client={client} currentUser={currentUser} onLogout={logout} />
+  );
+
   const mcpRecoveryElement = <MCPSlackRecoveryPage client={client} />;
 
   // The post-onboarding connect-AI / integrations banners. Shared verbatim by
@@ -2337,6 +2349,9 @@ function AppContent() {
             {ARTIFACT_FULLSCREEN_ROUTE_PATHS.map((path) => (
               <Route key={path} path={path} element={artifactFullscreenElement} />
             ))}
+
+            {/* Deep-link: artifact one-click branch+session creation. */}
+            <Route path={NEW_SESSION_ROUTE_PATH} element={newSessionElement} />
 
             {/* Mobile routes */}
             <Route
