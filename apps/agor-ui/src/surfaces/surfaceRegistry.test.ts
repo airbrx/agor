@@ -70,6 +70,15 @@ describe('surface route registry', () => {
     expect(routeUsesSharedUserSettings(path)).toBe(true);
   });
 
+  it.each(['/new'])('classifies %s as New session deep-link', (path) => {
+    expect(getRouteSurface(path).id).toBe('new-session');
+    expect(isKnowledgeRoutePath(path)).toBe(false);
+    expect(isWorkspaceRoutePath(path)).toBe(false);
+    expect(routeStartsWorkspaceRuntime(path)).toBe(false);
+    expect(routeUsesDeviceRouter(path)).toBe(false);
+    expect(routeUsesSharedUserSettings(path)).toBe(true);
+  });
+
   it('keeps the registered standalone demo route lightweight', () => {
     expect(getRouteSurface('/demo/streamdown').id).toBe('demo');
     expect(routeStartsWorkspaceRuntime('/demo/streamdown')).toBe(false);
