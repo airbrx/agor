@@ -1,5 +1,5 @@
-import type { AgorClient, Branch, Repo, Session, User } from '@agor-live/client';
-import { sessionPath } from '@agor-live/client';
+import type { AgenticToolName, AgorClient, Branch, Repo, Session, User } from '@agor-live/client';
+import { SessionStatus, sessionPath } from '@agor-live/client';
 import { Alert, Button, Card, Space, Spin, Typography } from 'antd';
 import { useCallback, useEffect, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
@@ -77,8 +77,9 @@ export function NewSessionPage({ client, currentUser }: NewSessionPageProps) {
       })) as Branch;
 
       const session = (await client.service('sessions').create({
+        agentic_tool: agent as AgenticToolName,
+        status: SessionStatus.IDLE,
         branch_id: branch.branch_id,
-        agent,
         title: branchName,
       })) as Session;
 
