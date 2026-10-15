@@ -29,15 +29,14 @@
 import type { Session } from '@agor-live/client';
 import { isSessionExecuting, SessionStatus } from '@agor-live/client';
 import {
-  BranchesOutlined,
   CaretDownOutlined,
   CaretRightOutlined,
   CloseOutlined,
-  ExportOutlined,
   PlusOutlined,
 } from '@ant-design/icons';
 import { Badge, Button, Modal, Tooltip, Typography, theme } from 'antd';
 import React, { useMemo, useState } from 'react';
+import { useAppNavigation } from '../../../hooks/useAppNavigation';
 import { useAgorStore } from '../../../store/agorStore';
 import { makeSessionsForBranchSelector, type ZoneMember } from '../../../store/selectors';
 
@@ -46,9 +45,6 @@ export const ZONE_WORKTREE_ROW_HEIGHT = 42;
 
 /** Height of each session row inside an expanded worktree. */
 const SESSION_ROW_HEIGHT = 28;
-
-/** Height of the "Open card" footer button inside an expanded worktree. */
-const EXPANDED_FOOTER_HEIGHT = 32;
 
 /** dataTransfer MIME identifying a worktree-row drag; namespaced to avoid clashing with OS drags. */
 export const ZONE_WORKTREE_DRAG_MIME = 'application/x-agor-zone-worktree';
@@ -81,8 +77,10 @@ const ZoneSessionRow: React.FC<{
   session: Session;
   textColor: string;
   index: number;
-}> = ({ session, textColor, index }) => {
+  onNavigate: () => void;
+}> = ({ session, textColor, index, onNavigate }) => {
   const { token } = theme.useToken();
+  const [hovered, setHovered] = React.useState(false);
   const isRunning = isSessionExecuting(session);
   const statusColor = isRunning
     ? token.colorPrimary
@@ -98,7 +96,23 @@ const ZoneSessionRow: React.FC<{
       : 'Idle';
 
   return (
+    // biome-ignore lint/a11y/useSemanticElements: row is a lightweight link-style element inside a list
     <div
+      role="button"
+      tabIndex={0}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      onClick={(e) => {
+        e.stopPropagation();
+        onNavigate();
+      }}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          onNavigate();
+        }
+      }}
+      aria-label={`Open session: ${label}`}
       style={{
         display: 'flex',
         alignItems: 'center',
@@ -107,6 +121,9 @@ const ZoneSessionRow: React.FC<{
         paddingLeft: token.paddingXL,
         paddingRight: token.paddingXS,
         boxSizing: 'border-box',
+        cursor: 'pointer',
+        background: hovered ? token.colorFillSecondary : 'transparent',
+        borderRadius: token.borderRadiusSM,
       }}
     >
       <Tooltip title={statusLabel}>
@@ -173,6 +190,7 @@ const ZoneWorktreeRowComponent: React.FC<ZoneWorktreeRowProps> = ({
 }) => {
   const { token } = theme.useToken();
   const [hovered, setHovered] = React.useState(false);
+  const { goToSession } = useAppNavigation();
 
   // Per-branch session subscription — the same slice BranchNode subscribes to.
   const sessionsSelector = useMemo(
@@ -293,7 +311,6 @@ const ZoneWorktreeRowComponent: React.FC<ZoneWorktreeRowProps> = ({
             }}
           />
         </Tooltip>
-        <BranchesOutlined style={{ flex: '0 0 auto', color: textColor, opacity: 0.7 }} />
         <Typography.Text
           ellipsis={{ tooltip: member.branch.name }}
           style={{ flex: 1, minWidth: 0, fontSize: token.fontSizeSM, color: textColor }}
@@ -305,44 +322,40 @@ const ZoneWorktreeRowComponent: React.FC<ZoneWorktreeRowProps> = ({
           showZero
           style={{ backgroundColor: token.colorPrimaryBgHover, color: token.colorText }}
         />
-        {hovered && (
-          <div style={{ flex: '0 0 auto', display: 'flex', gap: token.marginXXS }}>
-            <Tooltip title="Open card">
-              <Button
-                type="text"
-                size="small"
-                className="nodrag"
-                style={{ color: textColor }}
-                icon={<ExportOutlined />}
-                aria-label={`Open card for ${member.branch.name}`}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  onOpenWorktreeCard?.(member.branchId);
-                }}
-              />
-            </Tooltip>
-            {canEdit && (
-              <Tooltip title="Remove from zone">
-                <Button
-                  type="text"
-                  size="small"
-                  className="nodrag"
-                  style={{ color: textColor }}
-                  icon={<CloseOutlined />}
-                  aria-label={`Remove ${member.branch.name} from zone`}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    Modal.confirm({
-                      title: `Remove ${member.branch.name} from zone?`,
-                      content: 'It will return to the board as a card.',
-                      okText: 'Remove',
-                      onOk: () => onRemoveFromZone?.(member),
-                    });
-                  }}
-                />
-              </Tooltip>
-            )}
-          </div>
+        <Tooltip title="Open card">
+          <Button
+            type="text"
+            size="small"
+            className="nodrag"
+            style={{ flex: '0 0 auto', color: textColor }}
+            icon={<PlusOutlined />}
+            aria-label={`Open card for ${member.branch.name}`}
+            onClick={(event) => {
+              event.stopPropagation();
+              onOpenWorktreeCard?.(member.branchId);
+            }}
+          />
+        </Tooltip>
+        {hovered && canEdit && (
+          <Tooltip title="Remove from zone">
+            <Button
+              type="text"
+              size="small"
+              className="nodrag"
+              style={{ flex: '0 0 auto', color: textColor }}
+              icon={<CloseOutlined />}
+              aria-label={`Remove ${member.branch.name} from zone`}
+              onClick={(event) => {
+                event.stopPropagation();
+                Modal.confirm({
+                  title: `Remove ${member.branch.name} from zone?`,
+                  content: 'It will return to the board as a card.',
+                  okText: 'Remove',
+                  onOk: () => onRemoveFromZone?.(member),
+                });
+              }}
+            />
+          </Tooltip>
         )}
       </div>
 
@@ -379,35 +392,10 @@ const ZoneWorktreeRowComponent: React.FC<ZoneWorktreeRowProps> = ({
                 session={session}
                 textColor={textColor}
                 index={index}
+                onNavigate={() => goToSession(session.session_id)}
               />
             ))
           )}
-          {/* "+" footer — opens the full branch card */}
-          <div
-            style={{
-              height: EXPANDED_FOOTER_HEIGHT,
-              display: 'flex',
-              alignItems: 'center',
-              paddingLeft: token.paddingMD,
-              paddingRight: token.paddingXS,
-              borderTop: `1px solid ${token.colorBorderSecondary}`,
-              marginTop: token.marginXXS,
-            }}
-          >
-            <Button
-              type="text"
-              size="small"
-              className="nodrag"
-              icon={<PlusOutlined />}
-              style={{ color: textColor, opacity: 0.7, fontSize: token.fontSizeSM }}
-              onClick={(event) => {
-                event.stopPropagation();
-                onOpenWorktreeCard?.(member.branchId);
-              }}
-            >
-              <span style={{ fontSize: token.fontSizeSM - 1 }}>Open card</span>
-            </Button>
-          </div>
         </div>
       )}
     </div>
