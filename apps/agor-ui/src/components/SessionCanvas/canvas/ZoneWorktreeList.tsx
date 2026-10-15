@@ -88,7 +88,7 @@ const ZoneSessionRow: React.FC<{
       ? token.colorError
       : token.colorTextQuaternary;
 
-  const label = session.name || `Session ${index + 1}`;
+  const label = session.title || `Session ${index + 1}`;
   const statusLabel = isRunning
     ? 'Running'
     : session.status === SessionStatus.FAILED
