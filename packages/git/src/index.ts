@@ -496,6 +496,17 @@ export async function resolveGitRef(
 
   const shas = new Set(candidates.map((candidate) => candidate.sha));
   if (shas.size > 1) {
+    // When a bare branch name resolves to both a local branch and remote
+    // tracking branches that disagree, prefer the remote over the local.
+    // A stale local branch is the common case (e.g. main behind origin/main);
+    // silently using the remote is safer than blocking worktree creation.
+    const remotes = candidates.filter((c) => c.kind === 'remote_branch');
+    const remoteShas = new Set(remotes.map((c) => c.sha));
+    if (remotes.length > 0 && remoteShas.size === 1) {
+      const chosen = remotes[0];
+      const { display: _display, ...resolved } = chosen;
+      return resolved;
+    }
     const details = candidates
       .map((candidate) => `${candidate.display} @ ${candidate.sha}`)
       .join(', ');
