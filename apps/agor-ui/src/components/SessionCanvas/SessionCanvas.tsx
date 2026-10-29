@@ -1097,10 +1097,11 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             zoneId,
             trigger,
             sessions: agorStore.getState().sessionsByBranch.get(branchId) ?? EMPTY_SESSIONS,
+            ticket: boardGuard.capture(),
           });
         }
       },
-      [client, board]
+      [client, board, boardGuard]
     );
 
     // Board objects hook

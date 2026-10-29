@@ -221,7 +221,7 @@ export const useBoardObjects = ({
    */
   const patchWorktreeZone = useCallback(
     async (objectId: string, zoneId: string | null) => {
-      if (!canEditRef.current || !canMutateRef.current || !client) return;
+      if (!guardRef.current.canMutate || !client) return;
       try {
         await client.service('board-objects').patch(objectId, { zone_id: zoneId });
       } catch (error) {
@@ -242,7 +242,7 @@ export const useBoardObjects = ({
    */
   const patchWorktreeDetachAt = useCallback(
     async (objectId: string, position: { x: number; y: number }) => {
-      if (!canEditRef.current || !canMutateRef.current || !client) return;
+      if (!guardRef.current.canMutate || !client) return;
       try {
         await client.service('board-objects').patch(objectId, { position, zone_id: null });
       } catch (error) {
