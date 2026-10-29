@@ -1090,6 +1090,8 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             }
           })();
         } else {
+          const ticket = boardGuard.capture();
+          if (!ticket) return;
           setBranchTriggerModal({
             actionId: ++nextBranchTriggerActionIdRef.current,
             branchId: branchId as BranchID,
@@ -1097,10 +1099,11 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             zoneId,
             trigger,
             sessions: agorStore.getState().sessionsByBranch.get(branchId) ?? EMPTY_SESSIONS,
+            ticket,
           });
         }
       },
-      [client, board]
+      [client, board, boardGuard]
     );
 
     // Board objects hook
